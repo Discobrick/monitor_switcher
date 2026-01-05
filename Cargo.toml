@@ -1,0 +1,16 @@
+[package]
+name = "monitor_switcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+windows = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
+] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+tray-icon = "0.14"
