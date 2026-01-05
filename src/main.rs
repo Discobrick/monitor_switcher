@@ -100,27 +100,32 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 
 static LAST_TRIGGER: Mutex<Option<Instant>> = Mutex::new(None);
-const COOLDOWN_DURATION: Duration = Duration::from_secs(5);
+const COOLDOWN_DURATION: Duration = Duration::from_secs(2);
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_DEVICECHANGE => {
-            if wparam.0 == 0x0007 { // DBT_DEVNODES_CHANGED
-                let mut last_trigger = LAST_TRIGGER.lock().unwrap();
+            println!("\n[Event] WM_DEVICECHANGE received. wparam: 0x{:04X}", wparam.0);
+            
+            // DBT_DEVNODES_CHANGED (0x0007)
+            // DBT_DEVICEARRIVAL (0x8000)
+            // DBT_DEVICEREMOVECOMPLETE (0x8004)
+            if wparam.0 == 0x0007 || wparam.0 == 0x8000 || wparam.0 == 0x8004 {
+                let last_trigger = LAST_TRIGGER.lock().unwrap();
 
                 // Check if we are still in the cooldown period
                 if let Some(instant) = *last_trigger {
                     if instant.elapsed() < COOLDOWN_DURATION {
-                        // Ignore this event, it's likely just the monitors refreshing
+                        println!("[Debug] Ignoring event due to cooldown.");
                         return LRESULT(0);
                     }
                 }
+                drop(last_trigger);
 
-                println!("\n[Event] Hardware change detected. Checking state...");
+                println!("[Event] Hardware change significant. Checking state...");
+                // Small delay to let the OS finish device initialization
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 check_usb_state();
-
-                // Update the last trigger time
-                *last_trigger = Some(Instant::now());
             }
             LRESULT(0)
         }
@@ -201,20 +206,30 @@ fn check_usb_state() {
     // 2. Thread-Safe State Management
     // Ordering::SeqCst ensures all threads see the same value at the same time
     let previously_connected = WAS_CONNECTED.load(Ordering::SeqCst);
+    println!("[Debug] State - Any Found: {}, Previously Connected: {}", any_found, previously_connected);
 
     if !any_found && previously_connected {
         // Transition: Connected -> Disconnected
         println!(">>> USB DEVICES DISCONNECTED: Switching to Remote Input...");
         execute_commands(&config.disconnect_cmds);
         WAS_CONNECTED.store(false, Ordering::SeqCst);
+        
+        if let Ok(mut last_trigger) = LAST_TRIGGER.lock() {
+            *last_trigger = Some(Instant::now());
+        }
 
     } else if any_found && !previously_connected {
         // Transition: Disconnected -> Connected
         println!(">>> USB DEVICES RECONNECTED: Switching to Local Input...");
         execute_commands(&config.connect_cmds);
         WAS_CONNECTED.store(true, Ordering::SeqCst);
+
+        if let Ok(mut last_trigger) = LAST_TRIGGER.lock() {
+            *last_trigger = Some(Instant::now());
+        }
+    } else {
+        println!("[Debug] No state change detected.");
     }
-    // Note: If state hasn't changed, we do absolutely nothing (prevents loops)
 }
 
 // Helper function to run commands and capture errors
