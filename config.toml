@@ -5,11 +5,11 @@ monitored_devices = [
 
 # Just the arguments now!
 disconnect_cmds = [
-#    '/SetValue "\\.\Display1\Monitor0" 60 17',
+    '/SetValue "\\.\Display1\Monitor0" 60 17',
     '/SetValue "\\.\Display2\Monitor0" 60 15'
 ]
 
 connect_cmds = [
-#    '/SetValue "\\.\Display1\Monitor0" 60 15',
+    '/SetValue "\\.\Display1\Monitor0" 60 15',
     '/SetValue "\\.\Display2\Monitor0" 60 17'
 ]
