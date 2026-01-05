@@ -26,7 +26,10 @@ To add a device to the `monitored_devices` list, you need to find its Vendor ID 
 1.  Open **PowerShell**.
 2.  Copy and paste the following command:
     ```powershell
-    Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match 'VID_[0-9A-F]{4}&PID_[0-9A-F]{4}' } | Select-Object FriendlyName, InstanceId
+    Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match 'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})' } | 
+    Select-Object FriendlyName, @{n='HardwareID'; e={$Matches[0]}} | 
+    Select-Object * -Unique | 
+    Format-Table -AutoSize
     ```
 3.  Look for your device in the `FriendlyName` column.
 4.  The `InstanceId` column will contain the `VID_XXXX&PID_YYYY` string you need.
