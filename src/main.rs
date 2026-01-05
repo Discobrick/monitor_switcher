@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"] // Commented out so you can see the console
+#![windows_subsystem = "windows"] // Commented out so you can see the console
 
 use std::process::Command;
 use std::fs;
