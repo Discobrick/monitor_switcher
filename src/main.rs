@@ -75,8 +75,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         println!("Background window created. Listening for device changes...");
     }
 
-    check_usb_state();
-
     // 3. Main Message Loop
     let mut message = MSG::default();
     unsafe {
