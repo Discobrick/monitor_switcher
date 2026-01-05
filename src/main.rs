@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use serde::Deserialize;
+use hidapi::HidApi;
 
 use windows::core::{PCWSTR, w};
 use windows::Win32::Foundation::*;
@@ -47,6 +48,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_tooltip("Monitor USB Switcher")
         .build()
         .map_err(|e| e.to_string())?;
+
+    // 3. Initialize USB State
+    println!("Checking initial USB state...");
+    let initial_state = check_usb_state_silent();
+    WAS_CONNECTED.store(initial_state, Ordering::SeqCst);
+    println!("Initial state: {}", if initial_state { "Connected" } else { "Disconnected" });
 
     unsafe {
         let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
@@ -125,6 +132,41 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
+fn check_usb_state_silent() -> bool {
+    let Ok(config_str) = fs::read_to_string("config.toml") else {
+        return false;
+    };
+    let Ok(config) = toml::from_str::<Config>(&config_str) else {
+        return false;
+    };
+
+    let Ok(api) = HidApi::new() else {
+        return false;
+    };
+
+    for device in api.device_list() {
+        for id in &config.monitored_devices {
+            if let Some((vid, pid)) = parse_vid_pid(id) {
+                if device.vendor_id() == vid && device.product_id() == pid {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn parse_vid_pid(id: &str) -> Option<(u16, u16)> {
+    // Expected format: "VID_046D&PID_085C"
+    let vid_part = id.split('&').find(|s| s.starts_with("VID_"))?;
+    let pid_part = id.split('&').find(|s| s.starts_with("PID_"))?;
+
+    let vid = u16::from_str_radix(&vid_part[4..], 16).ok()?;
+    let pid = u16::from_str_radix(&pid_part[4..], 16).ok()?;
+
+    Some((vid, pid))
+}
+
 fn check_usb_state() {
     let Ok(config_str) = fs::read_to_string("config.toml") else {
         println!("[Error] Could not read config.toml");
@@ -137,27 +179,23 @@ fn check_usb_state() {
 
     let mut any_found = false;
 
+    let Ok(api) = HidApi::new() else {
+        println!("[Error] Could not initialize HidApi");
+        return;
+    };
+
     // 1. Hardware Detection
-    for id in &config.monitored_devices {
-        // We removed "-Status OK" and replaced it with a filter for 'Present'
-        // This is more reliable for devices that just woke up
-        let script = format!(
-            "Get-PnpDevice -InstanceId *{}* | Where-Object {{ $_.Present -eq $true }}",
-            id
-        );
-
-        let output = Command::new("powershell")
-            .args(&["-Command", &script])
-            .output();
-
-        if let Ok(out) = output {
-            if !out.stdout.is_empty() {
-                any_found = true;
-                // Add a debug print here to see WHICH device was found
-                println!("[Debug] Found active device: {}", id);
-                break;
+    for device in api.device_list() {
+        for id in &config.monitored_devices {
+            if let Some((vid, pid)) = parse_vid_pid(id) {
+                if device.vendor_id() == vid && device.product_id() == pid {
+                    any_found = true;
+                    println!("[Debug] Found active device: {}", id);
+                    break;
+                }
             }
         }
+        if any_found { break; }
     }
 
     // 2. Thread-Safe State Management
