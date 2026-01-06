@@ -128,3 +128,14 @@ The `connect_cmds` and `disconnect_cmds` sections contain the arguments that wil
 
 *   `connect_cmds`: Executed when any of the monitored devices are detected (e.g., switching to local input).
 *   `disconnect_cmds`: Executed when ALL monitored devices are removed (e.g., switching to remote input).
+
+## Running at Startup (Windows)
+
+To have Monitor Switcher start automatically when you log in to Windows:
+
+1.  Press `Win + R` on your keyboard to open the **Run** dialog.
+2.  Type `shell:startup` and press **Enter**. This opens the Startup folder.
+3.  Right-click your `monitor_switcher.exe` and select **Create shortcut**.
+4.  Move the newly created shortcut into the **Startup** folder you just opened.
+
+**Note:** Ensure that `config.toml` and `ControlMyMonitor.exe` are in the same directory as `monitor_switcher.exe`.
