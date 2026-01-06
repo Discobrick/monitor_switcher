@@ -2,6 +2,13 @@
 
 Monitor Switcher is a utility that monitors the presence of specific USB (HID) devices and executes commands to switch monitor inputs accordingly. It is particularly useful for switching monitor inputs automatically when a USB switch or KVM is toggled.
 
+## Requirements
+
+This utility requires `ControlMyMonitor.exe` from NirSoft to interact with your monitors.
+
+1.  Download **ControlMyMonitor** from the official website: [https://www.nirsoft.net/utils/control_my_monitor.html](https://www.nirsoft.net/utils/control_my_monitor.html)
+2.  Extract `ControlMyMonitor.exe` and place it in the same directory as the `monitor_switcher` executable.
+
 ## Configuration
 
 The application is configured via `config.toml`.
@@ -100,7 +107,7 @@ This script will display the Device Name, the Hardware ID (VID/PID), and the Act
 
 The `connect_cmds` and `disconnect_cmds` use `ControlMyMonitor.exe` to change the monitor input. To configure these, you need the **Monitor Device Name** and the **Input Value**.
 
-1.  Run `ControlMyMonitor.exe` (included in this folder).
+1.  Run `ControlMyMonitor.exe`. (If you don't have it, see [Requirements](#requirements))
 2.  Select the monitor you want to configure from the dropdown at the top.
 3.  The **Monitor Device Name** is displayed in the title bar or can be found by going to **File > Export Selected Monitors** (it looks like `\\.\DISPLAY1\Monitor0`).
 4.  Look for the row with **VCP Code `60`** (Input Select).

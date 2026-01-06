@@ -21,12 +21,12 @@ fn main() {
         if src.exists() {
             if let Err(e) = fs::copy(src, &dest) {
                 // This will show up in the terminal if the copy fails
-                println!("cargo:warning=Failed to copy {}: {}", filename, e);
+                println!("cargo:warning=Failed to copy {filename}: {e}");
             } else {
-                println!("cargo:info=Successfully copied {} to {}", filename, dest.display());
+                println!("cargo:info=Successfully copied {filename} to {}", dest.display());
             }
         } else {
-            println!("cargo:warning=Source file {} not found in project root!", filename);
+            println!("cargo:warning=Source file {filename} not found in project root!");
         }
     }
 }
