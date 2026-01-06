@@ -12,7 +12,7 @@ fn main() {
     let target_dir = Path::new("target").join(profile);
 
     // List of files to bundle with your app
-    let files_to_copy = ["config.toml", "ControlMyMonitor.exe"];
+    let files_to_copy = ["config.toml", "ControlMyMonitor.exe", "icon.ico"];
 
     for filename in files_to_copy {
         let src = Path::new(filename);

@@ -12,7 +12,7 @@ use windows::core::{PCWSTR, w};
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::Graphics::Gdi::HBRUSH;
-use tray_icon::{TrayIconBuilder, menu::{Menu, MenuItem}, TrayIconEvent};
+use tray_icon::{TrayIconBuilder, menu::{Menu, MenuItem}, TrayIconEvent, Icon};
 
 #[derive(Deserialize)]
 struct Config {
@@ -43,9 +43,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let quit_item = MenuItem::new("Quit", true, None);
     let _ = tray_menu.append(&quit_item).map_err(|e| e.to_string())?;
 
+    let icon_path = std::path::Path::new("icon.ico");
+    let icon = Icon::from_path(icon_path, Some((32, 32)))
+        .map_err(|e| e.to_string())?;
+
     let _tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_tooltip("Monitor USB Switcher")
+        .with_icon(icon)
         .build()
         .map_err(|e| e.to_string())?;
 

@@ -1,15 +1,17 @@
+# Replace these with your own device VID&PID strings
 monitored_devices = [
     "VID_046D&PID_085C",
-    "VID_3142&PID_0686"
+    "VID_3142&PID_0686",
 ]
 
-# Just the arguments now!
+# These commands mean that when the monitored devices are disconnected we will set the monitor input to 17 and 15
 disconnect_cmds = [
     '/SetValue "\\.\Display1\Monitor0" 60 17',
     '/SetValue "\\.\Display2\Monitor0" 60 15'
-]
+] # To add more just add more lines here as  '/SetValue "\\.\DisplayX\Monitor0" 60 YY'
 
+# These commands mean that when the monitored devices are connected we will set the monitor input to 15 and 17
 connect_cmds = [
     '/SetValue "\\.\Display1\Monitor0" 60 15',
     '/SetValue "\\.\Display2\Monitor0" 60 17'
-]
+]# To add more just add more lines here as  '/SetValue "\\.\DisplayX\Monitor0" 60 YY'
