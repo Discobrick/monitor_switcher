@@ -37,7 +37,7 @@ jobs:
         echo "TAG_NAME=$tagName" >> $env:GITHUB_ENV
         
         # Files are copied to target/release by build.rs
-        Compress-Archive -Path target/release/monitor_switcher.exe, target/release/config.toml, target/release/ControlMyMonitor.exe, target/release/icon.ico -DestinationPath monitor_switcher.zip
+        Compress-Archive -Path target/release/monitor_switcher.exe, target/release/config.toml, target/release/icon.ico -DestinationPath monitor_switcher.zip
 
     - name: Create Release
       if: github.event_name == 'push' && github.ref == 'refs/heads/master'

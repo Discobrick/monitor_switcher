@@ -5,14 +5,13 @@ use std::env;
 fn main() {
     // Tell Cargo to rerun this script if these files change
     println!("cargo:rerun-if-changed=config.toml");
-    println!("cargo:rerun-if-changed=ControlMyMonitor.exe");
 
     // Get the output directory (target/debug or target/release)
     let profile = env::var("PROFILE").unwrap();
     let target_dir = Path::new("target").join(profile);
 
     // List of files to bundle with your app
-    let files_to_copy = ["config.toml", "ControlMyMonitor.exe", "icon.ico"];
+    let files_to_copy = ["config.toml", "icon.ico"];
 
     for filename in files_to_copy {
         let src = Path::new(filename);
