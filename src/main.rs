@@ -12,7 +12,7 @@ use windows::core::{PCWSTR, w};
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::Graphics::Gdi::HBRUSH;
-use tray_icon::{TrayIconBuilder, menu::{Menu, MenuItem}, TrayIconEvent, Icon};
+use tray_icon::{TrayIconBuilder, menu::{Menu, MenuItem, MenuEvent}, TrayIconEvent, Icon};
 
 #[derive(Deserialize)]
 struct Config {
@@ -94,8 +94,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             TranslateMessage(&message);
             DispatchMessageW(&message);
 
+            if let Ok(event) = MenuEvent::receiver().try_recv() {
+                if event.id == quit_item.id() {
+                    break;
+                }
+            }
+
             if let Ok(_event) = TrayIconEvent::receiver().try_recv() {
-                // Exit logic could go here
+                // Other events
             }
         }
     }
