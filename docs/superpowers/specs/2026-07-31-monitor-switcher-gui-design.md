@@ -27,11 +27,13 @@ switch being toggled), switch monitor inputs via DDC/CI.
 | Config migration | Automatic v1 → v2 | An existing working setup must survive the upgrade |
 | Styling | Plain CSS with custom properties | Tailwind means npm plus a watcher bolted onto a Rust build, for four tabs |
 | Command editing | Removed | Fully replaced by the UI; users never see a `/SetValue` string again |
+| Linux development | cfg-gated mock hardware backend | The UI must be runnable and debuggable on the development machine |
 
 ### Explicitly out of scope for v1
 
 Toast notifications (the monitors visibly switching *is* the notification), draggable
-desktop arrangement, raw command-string editing, a mock layer over the Windows FFI.
+desktop arrangement, raw command-string editing, and any attempt to make the mock backend
+a functional Linux port — it exists to develop the UI, not to switch real monitors.
 
 ## 3. Architecture
 
@@ -58,8 +60,10 @@ UI never blocks.
 src/main.rs            bootstrap, tray, window lifecycle
 src/config.rs          schema, load/save, v1 -> v2 migration
 src/watcher.rs         hidden window, state machine, cooldown
-src/hardware/usb.rs    SetupAPI enumeration
-src/hardware/mon.rs    EnumDisplayMonitors layout + ControlMyMonitor exec/parse
+src/hardware/mod.rs    re-exports the real or mock backend by target
+src/hardware/usb.rs    SetupAPI enumeration              (windows)
+src/hardware/mon.rs    EnumDisplayMonitors layout + ControlMyMonitor exec/parse (windows)
+src/hardware/mock.rs   canned devices and monitors       (non-windows)
 src/deps.rs            ControlMyMonitor detect / download / browse
 src/startup.rs         shell:startup shortcut
 src/ui/dashboard.rs    status, log
@@ -250,24 +254,81 @@ Unit tests, runnable under `cargo test` on any platform:
 - The watcher state machine: transitions, debounce, cooldown suppression, and the
   dirty-resync at expiry
 
-The Windows FFI layer gets no mock abstraction — introducing traits for a single
-implementation adds indirection without adding coverage. It is verified by running the
-application on the target machine.
+The Windows FFI layer gets no trait abstraction — a trait with one real implementation adds
+indirection without adding coverage. The mock backend described in §11 is a compile-time
+module swap, not a runtime seam, and exists for UI development rather than for assertions.
+The real hardware layer is verified by running the application on the target machine.
 
 ## 10. Implementation order
 
 Each step leaves the application in a working, launchable state:
 
 1. Config v2 schema, load/save, migration, and their tests. No UI.
-2. SetupAPI enumeration replacing `hidapi`, wired into the existing headless watcher.
+2. SetupAPI enumeration replacing `hidapi`, wired into the existing headless watcher. The
+   `hardware/mod.rs` split and the mock backend land here, alongside the real one — the UI
+   steps that follow are not developable on Linux without it.
 3. Watcher extracted into `watcher.rs` with the pure state machine, debounce, and cooldown,
    plus its tests. Behaviour still headless and equivalent to today's.
-4. Dioxus shell: window, tray, hide-on-close, event channel, Dashboard view.
+4. Dioxus shell: window, tray, hide-on-close, event channel, Dashboard view, debug panel.
 5. Devices view.
 6. Monitor enumeration and layout rendering, then the input rules and test flow.
 7. Settings: dependency detection, download assistant, startup shortcut, cooldown slider.
 
-## 11. Startup integration
+## 11. Development on Linux
+
+The UI must be runnable on the development machine, which is Linux. `cargo run` on a
+non-Windows target launches the full Dioxus application against a mock hardware backend.
+
+**Selection is by target, not by feature flag.** `hardware/mod.rs` re-exports either the
+Windows modules or `mock.rs`:
+
+```rust
+#[cfg(windows)]      mod usb; mod mon;
+#[cfg(not(windows))] mod mock; pub use mock::{usb, mon};
+```
+
+Both expose identical function signatures, so no call site is cfg-gated and the UI code is
+entirely platform-independent. There is no runtime switch and no way to accidentally ship
+the mock on Windows.
+
+### What the mock provides
+
+- **USB devices** — eleven entries mirroring a realistic machine: some with proper friendly
+  names, some generic ("USB Input Device"), a mix of Mouse / Keyboard / Camera / HIDClass,
+  and duplicate VID&PID nodes so the deduplication path is exercised.
+- **Monitors** — three, in an L arrangement with one portrait and one at a different scale,
+  so the layout maths is genuinely tested. Each carries a serial, model name, and a mutable
+  current VCP 60 value.
+- **Switch execution** — mutates the mock's in-memory VCP values and logs, so the test flow,
+  the countdown, the auto-revert, and the confirmation dialog all work end to end.
+- **Dependency check** — reports `ControlMyMonitor.exe` as present by default.
+- **Startup shortcut** — a no-op returning the toggled state.
+
+### Debug panel
+
+Compiled only on non-Windows targets, reached from the sidebar. Because there is no real
+`WM_DEVICECHANGE` on Linux, this is how watcher behaviour is driven:
+
+- Simulate device connect / disconnect, including rapid toggling to exercise debounce and
+  cooldown
+- Plug and unplug individual mock devices, so the greyed "configured but absent" state is
+  reachable
+- Force the dependency-missing banner
+- Force a command failure, producing the red log entry
+- Force an unmatched-monitor config, exercising the migration edge case
+
+### Cross-platform hygiene
+
+- The tray icon is skipped on non-Windows; the window is shown at launch instead.
+- The watcher thread's hidden-window plumbing is `#[cfg(windows)]`; on Linux the state
+  machine is driven directly by the debug panel over the same channel, so the code path
+  under test is the real one.
+- CI gains a Linux `cargo check` and `cargo test` job alongside the existing Windows build,
+  so the mock backend cannot silently drift out of sync with the real signatures.
+
+Dioxus desktop on Linux requires `webkit2gtk` and `libsoup` to be installed.
+
+## 12. Startup integration
 
 The Run at startup toggle creates or removes a `.lnk` shortcut in `shell:startup` via
 `IShellLink` COM, replacing the manual instructions currently documented in the README.
