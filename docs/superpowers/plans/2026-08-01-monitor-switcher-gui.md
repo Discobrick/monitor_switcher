@@ -16,6 +16,8 @@
 - `windows` crate stays at **0.52** — do not upgrade to 0.6x, the API churn buys nothing here.
 - Dioxus pinned to **0.7.10** (0.8 is alpha). If any Dioxus API in this plan does not compile, check the 0.7 docs and adapt — the plan's structure, not its exact call syntax, is what matters.
 - Hardware backend selection is by `#[cfg(windows)]` only. **Never** a Cargo feature, never a runtime flag.
+- Modules live in `src/lib.rs` as `pub mod`; `src/main.rs` is a thin binary that consumes them via `use monitor_switcher::…`. No module is ever declared in both.
+- Windows-only crates (`windows`, `tray-icon`) live under `[target.'cfg(windows)'.dependencies]`, so a Linux build never pulls them.
 - No `tokio`. No polling loops. Device detection is event-driven; everything else is user-triggered.
 - VCP code is hardcoded to `60` (input select). Do not add a configurable VCP field.
 - `unwrap()`/`expect()` only where failure is impossible by construction. Everything fallible returns `Result`.
@@ -28,7 +30,8 @@
 
 | File | Responsibility |
 |---|---|
-| `src/main.rs` | Bootstrap, tray icon, window lifecycle, channel wiring |
+| `src/lib.rs` | Module root: `pub mod` declarations for everything below |
+| `src/main.rs` | Thin binary: bootstrap, tray icon, window lifecycle, channel wiring |
 | `src/config.rs` | v2 schema, load/save, v1→v2 migration |
 | `src/watcher.rs` | Pure state machine + the thread that drives it |
 | `src/hardware/mod.rs` | Shared types; re-exports real or mock backend by target |
@@ -257,7 +260,7 @@ impl Config {
 }
 ```
 
-Add `mod config;` to `src/main.rs` (above `fn main`).
+Add `pub mod config;` to `src/lib.rs`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -408,7 +411,7 @@ pub fn parse_vid_pid(id: &str) -> Option<(u16, u16)> {
     let mut vid = None;
     let mut pid = None;
 
-    for part in upper.split('&') {
+    for part in upper.split(['&', '\\']) {
         if let Some(hex) = part.strip_prefix("VID_") {
             vid = u16::from_str_radix(hex, 16).ok();
         } else if let Some(hex) = part.strip_prefix("PID_") {
@@ -599,7 +602,7 @@ pub enum HardwareError {
 }
 ```
 
-Add `mod hardware;` to `src/main.rs`.
+Add `pub mod hardware;` to `src/lib.rs`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1760,7 +1763,7 @@ impl WatcherState {
 }
 ```
 
-Add `mod watcher;` to `src/main.rs`.
+Add `pub mod watcher;` to `src/lib.rs`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1852,7 +1855,7 @@ pub enum Command {
 }
 ```
 
-Add `mod app;` to `src/main.rs`.
+Add `pub mod app;` to `src/lib.rs`.
 
 - [ ] **Step 2: Write the watcher thread**
 
@@ -2139,10 +2142,7 @@ mod win {
 Replace `src/main.rs` entirely:
 
 ```rust
-mod app;
-mod config;
-mod hardware;
-mod watcher;
+use monitor_switcher::{app, config, hardware, watcher};
 
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
@@ -2567,11 +2567,7 @@ futures-util = "0.3"
 Replace the temporary event-printing loop in `src/main.rs`:
 
 ```rust
-mod app;
-mod config;
-mod hardware;
-mod ui;
-mod watcher;
+use monitor_switcher::{app, config, hardware, ui, watcher};
 
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
@@ -4012,7 +4008,7 @@ pub fn Settings() -> Element {
 
 - [ ] **Step 4: Register the new modules and run migration at startup**
 
-In `src/main.rs`, add `mod deps;` and `mod startup;`, and replace the config load with a migration-aware version:
+In `src/lib.rs`, add `pub mod deps;` and `pub mod startup;`. In `src/main.rs`, add them to the `use monitor_switcher::{...}` list and replace the config load with a migration-aware version:
 
 ```rust
     let raw = std::fs::read_to_string(dir.join(config::CONFIG_FILE)).unwrap_or_default();
