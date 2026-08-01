@@ -130,9 +130,244 @@ impl Config {
     }
 }
 
+use crate::hardware::parse::StextMonitor;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationError {
+    #[error("could not parse the v1 config: {0}")]
+    Parse(#[from] toml::de::Error),
+}
+
+#[derive(Deserialize)]
+struct ConfigV1 {
+    #[serde(default)]
+    monitored_devices: Vec<String>,
+    #[serde(default)]
+    connect_cmds: Vec<String>,
+    #[serde(default)]
+    disconnect_cmds: Vec<String>,
+}
+
+/// True when `raw` is a pre-versioning config.
+pub fn is_v1(raw: &str) -> bool {
+    !raw.lines().any(|l| l.trim_start().starts_with("version"))
+}
+
+/// Extracts the monitor argument and value from `/SetValue "<mon>" 60 <n>`.
+pub fn parse_set_value(cmd: &str) -> Option<(String, u16)> {
+    let rest = cmd.trim().strip_prefix("/SetValue")?.trim();
+
+    let (monitor, tail) = if let Some(after_quote) = rest.strip_prefix('"') {
+        let end = after_quote.find('"')?;
+        (after_quote[..end].to_string(), &after_quote[end + 1..])
+    } else {
+        let end = rest.find(' ')?;
+        (rest[..end].to_string(), &rest[end..])
+    };
+
+    let mut fields = tail.split_whitespace();
+    let vcp: u16 = fields.next()?.parse().ok()?;
+    if vcp != 60 {
+        return None;
+    }
+    let value: u16 = fields.next()?.parse().ok()?;
+
+    Some((monitor, value))
+}
+
+/// Normalises `\\.\Display1\Monitor0` for case-insensitive comparison.
+fn norm(device_name: &str) -> String {
+    device_name.to_ascii_uppercase()
+}
+
+impl Config {
+    /// Converts a v1 config body into a v2 `Config`.
+    ///
+    /// `monitors` comes from a fresh `/stext` dump and supplies the display-name
+    /// to serial mapping. `names` resolves a "VID_XXXX&PID_YYYY" to a
+    /// (friendly name, class) pair for devices currently plugged in.
+    ///
+    /// Rules whose display name is not in `monitors` are retained with an empty
+    /// serial and surfaced in the UI as unmatched, rather than being dropped.
+    pub fn migrate_v1(
+        raw: &str,
+        monitors: &[StextMonitor],
+        names: &dyn Fn(&str) -> Option<(String, String)>,
+    ) -> Result<Config, MigrationError> {
+        let old: ConfigV1 = toml::from_str(raw)?;
+        let mut out = Config::default();
+
+        out.devices = old
+            .monitored_devices
+            .iter()
+            .map(|id| {
+                let (name, class) = names(id)
+                    .unwrap_or_else(|| (id.clone(), "Other".to_string()));
+                DeviceEntry { id: id.clone(), name, class }
+            })
+            .collect();
+
+        // Display name -> (serial, model)
+        let by_display: Vec<(String, &StextMonitor)> =
+            monitors.iter().map(|m| (norm(&m.device_name), m)).collect();
+
+        // Display name -> (on_connect, on_disconnect), preserving first-seen order.
+        let mut rules: Vec<(String, Option<u16>, Option<u16>)> = Vec::new();
+
+        let mut record = |display: String, value: u16, is_connect: bool| {
+            let key = norm(&display);
+            match rules.iter_mut().find(|(d, _, _)| *d == key) {
+                Some((_, on_c, on_d)) => {
+                    if is_connect { *on_c = Some(value) } else { *on_d = Some(value) }
+                }
+                None => rules.push(if is_connect {
+                    (key, Some(value), None)
+                } else {
+                    (key, None, Some(value))
+                }),
+            }
+        };
+
+        for cmd in &old.connect_cmds {
+            if let Some((display, value)) = parse_set_value(cmd) {
+                record(display, value, true);
+            }
+        }
+        for cmd in &old.disconnect_cmds {
+            if let Some((display, value)) = parse_set_value(cmd) {
+                record(display, value, false);
+            }
+        }
+
+        out.monitors = rules
+            .into_iter()
+            .map(|(display, on_connect, on_disconnect)| {
+                match by_display.iter().find(|(d, _)| *d == display) {
+                    Some((_, m)) => MonitorRule {
+                        serial: m.serial.clone(),
+                        label: m.model.clone(),
+                        on_connect: on_connect.unwrap_or(0),
+                        on_disconnect: on_disconnect.unwrap_or(0),
+                    },
+                    None => MonitorRule {
+                        serial: String::new(),
+                        label: "Unmatched monitor".to_string(),
+                        on_connect: on_connect.unwrap_or(0),
+                        on_disconnect: on_disconnect.unwrap_or(0),
+                    },
+                }
+            })
+            .collect();
+
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardware::parse::StextMonitor;
+
+    fn sample_v1() -> &'static str {
+        r#"
+monitored_devices = [
+    "VID_046D&PID_085C",
+    "VID_3142&PID_0686",
+]
+
+disconnect_cmds = [
+    '/SetValue "\\.\Display1\Monitor0" 60 17',
+    '/SetValue "\\.\Display2\Monitor0" 60 15'
+]
+
+connect_cmds = [
+    '/SetValue "\\.\Display1\Monitor0" 60 15',
+    '/SetValue "\\.\Display2\Monitor0" 60 17'
+]
+"#
+    }
+
+    fn sample_monitors() -> Vec<StextMonitor> {
+        vec![
+            StextMonitor {
+                device_name: r"\\.\DISPLAY1\Monitor0".into(),
+                model: "DELL U2720Q".into(),
+                serial: "ABC123456".into(),
+                current_input: Some(15),
+            },
+            StextMonitor {
+                device_name: r"\\.\DISPLAY2\Monitor0".into(),
+                model: "LG HDR 4K".into(),
+                serial: "XYZ987654".into(),
+                current_input: Some(17),
+            },
+        ]
+    }
+
+    #[test]
+    fn parses_a_set_value_command() {
+        assert_eq!(
+            parse_set_value(r#"/SetValue "\\.\Display1\Monitor0" 60 15"#),
+            Some((r"\\.\Display1\Monitor0".to_string(), 15))
+        );
+        assert_eq!(parse_set_value("/GetValue whatever 60"), None);
+        assert_eq!(parse_set_value(""), None);
+    }
+
+    #[test]
+    fn migrates_devices_and_rules() {
+        let names = |id: &str| match id {
+            "VID_046D&PID_085C" => Some(("Logitech G502 HERO".to_string(), "Mouse".to_string())),
+            _ => None,
+        };
+
+        let c = Config::migrate_v1(sample_v1(), &sample_monitors(), &names).unwrap();
+
+        assert_eq!(c.version, 2);
+        assert_eq!(c.cooldown_secs, 60);
+
+        assert_eq!(c.devices.len(), 2);
+        assert_eq!(c.devices[0].name, "Logitech G502 HERO");
+        assert_eq!(c.devices[0].class, "Mouse");
+        // An absent device keeps its id as its display name.
+        assert_eq!(c.devices[1].name, "VID_3142&PID_0686");
+
+        assert_eq!(c.monitors.len(), 2);
+        let m1 = c.monitors.iter().find(|m| m.serial == "ABC123456").unwrap();
+        assert_eq!(m1.on_connect, 15);
+        assert_eq!(m1.on_disconnect, 17);
+        let m2 = c.monitors.iter().find(|m| m.serial == "XYZ987654").unwrap();
+        assert_eq!(m2.on_connect, 17);
+        assert_eq!(m2.on_disconnect, 15);
+    }
+
+    #[test]
+    fn display_name_matching_ignores_case() {
+        // v1 configs say "Display1", /stext says "DISPLAY1".
+        let names = |_: &str| None;
+        let c = Config::migrate_v1(sample_v1(), &sample_monitors(), &names).unwrap();
+        assert_eq!(c.monitors.len(), 2);
+    }
+
+    #[test]
+    fn unresolvable_monitors_are_kept_as_unmatched() {
+        let names = |_: &str| None;
+        let only_one = vec![sample_monitors()[0].clone()];
+
+        let c = Config::migrate_v1(sample_v1(), &only_one, &names).unwrap();
+
+        assert_eq!(c.monitors.len(), 2);
+        let unmatched = c.monitors.iter().find(|m| m.label == "Unmatched monitor").unwrap();
+        assert!(unmatched.serial.is_empty());
+        assert_eq!(unmatched.on_connect, 17);
+        assert_eq!(unmatched.on_disconnect, 15);
+    }
+
+    #[test]
+    fn detects_a_v1_file() {
+        assert!(is_v1(sample_v1()));
+        assert!(!is_v1("version = 2\ncooldown_secs = 60\n"));
+    }
 
     #[test]
     fn default_config_has_sixty_second_cooldown() {
