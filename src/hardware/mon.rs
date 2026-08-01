@@ -8,7 +8,7 @@
 //! parent module, where it is testable on any platform.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
@@ -17,8 +17,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
 
-use super::parse::{parse_stext, StextMonitor};
-use super::{combine, decode_dump, input_for_serial, tool_error, HardwareError, MonitorGeometry, MonitorInfo};
+use super::parse::StextMonitor;
+use super::{
+    combine, input_for_serial, parse_dump, tool_error, HardwareError, MonitorGeometry, MonitorInfo,
+    TempDump,
+};
 
 /// DDC/CI input-select VCP code. Fixed by the MCCS standard, so it is never
 /// configurable.
@@ -49,27 +52,16 @@ pub fn apply_input(tool: &Path, serial: &str, value: u16) -> Result<(), Hardware
     }
 }
 
-/// Removes the dump file on every exit path, including the error returns.
-struct TempDump(PathBuf);
-
-impl Drop for TempDump {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 /// Runs `/stext` into a temp file and parses it.
 fn dump_stext(tool: &Path) -> Result<Vec<StextMonitor>, HardwareError> {
-    // Named per process so two instances cannot read each other's dump.
-    let dump = TempDump(std::env::temp_dir().join(format!("monsw_{}.txt", std::process::id())));
-
-    let output = run(tool, &[OsStr::new("/stext"), dump.0.as_os_str()])?;
+    let dump = TempDump::new();
+    let output = run(tool, &[OsStr::new("/stext"), dump.path().as_os_str()])?;
 
     if !output.status.success() {
         return Err(tool_error(output.status.code(), &output.stderr));
     }
 
-    Ok(parse_stext(&decode_dump(&std::fs::read(&dump.0)?)))
+    parse_dump(&std::fs::read(dump.path())?)
 }
 
 /// Spawns the tool, reporting a missing executable as such rather than as a

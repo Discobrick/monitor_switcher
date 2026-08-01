@@ -1,5 +1,8 @@
 pub mod parse;
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 #[cfg(windows)]
 mod mon;
 #[cfg(windows)]
@@ -179,6 +182,74 @@ pub fn input_for_serial(monitors: &[parse::StextMonitor], serial: &str) -> Resul
         .find(|m| m.serial == serial)
         .and_then(|m| m.current_input)
         .ok_or_else(|| HardwareError::UnknownSerial(serial.to_string()))
+}
+
+/// The temp file a `/stext` dump is written to, removed on every exit path.
+///
+/// Lives here rather than in the Windows backend because none of it is FFI:
+/// the naming and the cleanup are what make concurrent dumps safe, so they are
+/// testable on any platform.
+pub struct TempDump(PathBuf);
+
+impl TempDump {
+    pub fn new() -> Self {
+        // The PID keeps concurrent processes apart; the counter keeps
+        // concurrent calls *within* a process apart, which a tray app does as
+        // soon as a background poll overlaps a user-triggered read.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        Self::at(std::env::temp_dir().join(format!(
+            "monsw_{}_{}.txt",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        )))
+    }
+
+    /// Takes ownership of `path`, clearing anything already there.
+    ///
+    /// A hard-killed run skips `Drop`. If its PID is later reused and the tool
+    /// then exits 0 without writing, that leftover would be parsed as the
+    /// current truth, so it is cleared before spawning rather than after.
+    fn at(path: PathBuf) -> Self {
+        let _ = std::fs::remove_file(&path);
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Default for TempDump {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TempDump {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Decodes and parses a `/stext` dump.
+///
+/// A dump that has content but yields no monitors means the file was not the
+/// text this parser expects — a BOM-less UTF-16 dump decoded lossily, say.
+/// Returning `Ok(vec![])` there would render as "this machine has no DDC/CI
+/// monitors", which is the one thing the user cannot tell apart from a real
+/// empty result, so it is an error instead.
+pub fn parse_dump(bytes: &[u8]) -> Result<Vec<parse::StextMonitor>, HardwareError> {
+    let text = decode_dump(bytes);
+    let monitors = parse::parse_stext(&text);
+
+    if monitors.is_empty() && !text.trim().is_empty() {
+        return Err(HardwareError::ToolFailed(format!(
+            "wrote a {}-byte dump that contained no monitor entries",
+            bytes.len()
+        )));
+    }
+
+    Ok(monitors)
 }
 
 /// Decodes a `/stext` dump, which ControlMyMonitor writes as UTF-16 or ANSI
@@ -517,5 +588,82 @@ mod tests {
     fn a_signal_kill_is_reported_rather_than_shown_as_no_code() {
         let err = tool_error(None, b"");
         assert!(matches!(err, HardwareError::ToolFailed(d) if d == "terminated by a signal"));
+    }
+
+    // -- dump parsing guard -------------------------------------------------
+
+    const DUMP: &str = "Monitor Device Name: \\\\.\\DISPLAY1\\Monitor0\r\n\
+                        Monitor Name: DELL U2720Q\r\n\
+                        Serial Number: ABC123456\r\n\
+                        VCP Code: 60\r\n\
+                        Current Value: 15\r\n";
+
+    #[test]
+    fn a_good_dump_parses_to_its_monitors() {
+        let parsed = parse_dump(DUMP.as_bytes()).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].serial, "ABC123456");
+    }
+
+    /// The failure this guards: a BOM-less UTF-16 dump decodes lossily to text
+    /// nothing can parse. Without the guard the UI shows an empty monitor list
+    /// and no error, which the user cannot tell apart from a machine that
+    /// genuinely has no DDC/CI monitors.
+    #[test]
+    fn a_dump_that_parses_to_nothing_is_an_error_not_an_empty_list() {
+        let bomless_utf16: Vec<u8> = DUMP.encode_utf16().flat_map(u16::to_le_bytes).collect();
+
+        let err = parse_dump(&bomless_utf16)
+            .expect_err("an undecodable dump must not masquerade as zero monitors");
+        assert!(matches!(err, HardwareError::ToolFailed(_)));
+    }
+
+    #[test]
+    fn readable_but_unrecognised_content_is_also_an_error() {
+        let err = parse_dump(b"<html><body>Access denied</body></html>").unwrap_err();
+        assert!(matches!(err, HardwareError::ToolFailed(_)));
+    }
+
+    /// A machine with no DDC/CI monitors is a real, non-error outcome, so a
+    /// dump with nothing in it must still succeed.
+    #[test]
+    fn a_genuinely_empty_dump_is_not_an_error() {
+        assert_eq!(parse_dump(b"").unwrap().len(), 0);
+        assert_eq!(parse_dump(b"\r\n   \r\n").unwrap().len(), 0);
+        // A BOM with no body is empty content, not garbage.
+        assert_eq!(parse_dump(&[0xFF, 0xFE]).unwrap().len(), 0);
+    }
+
+    // -- temp dump lifecycle ------------------------------------------------
+
+    /// Two dumps alive at once must not share a path: a tray app polls in the
+    /// background while the user triggers reads, and with a shared path the
+    /// first one dropped deletes the file the second is about to read.
+    #[test]
+    fn concurrent_dumps_get_distinct_paths() {
+        let (a, b) = (TempDump::new(), TempDump::new());
+        assert_ne!(a.path(), b.path());
+    }
+
+    #[test]
+    fn a_dump_path_is_removed_when_it_goes_out_of_scope() {
+        let path = {
+            let dump = TempDump::new();
+            std::fs::write(dump.path(), b"x").unwrap();
+            dump.path().to_path_buf()
+        };
+        assert!(!path.exists(), "the dump file outlived its TempDump");
+    }
+
+    /// A hard-killed prior run skips Drop. If the tool then exits 0 without
+    /// writing, a leftover at the same path would be parsed as current truth.
+    #[test]
+    fn construction_clears_a_leftover_file_at_the_same_path() {
+        let path = std::env::temp_dir().join("monsw_stale_test.txt");
+        std::fs::write(&path, b"stale dump from a killed run").unwrap();
+
+        let dump = TempDump::at(path.clone());
+        assert!(!path.exists(), "a stale dump survived construction");
+        assert_eq!(dump.path(), path);
     }
 }
