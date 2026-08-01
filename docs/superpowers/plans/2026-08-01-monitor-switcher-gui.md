@@ -625,7 +625,7 @@ git commit -m "feat: add hardware types and ControlMyMonitor /stext parser"
 
 **Interfaces:**
 - Consumes: `parse::parse_stext`, `StextMonitor`, `Config`, `DeviceEntry`, `MonitorRule`
-- Produces: `MigrationOutcome`, `Config::migrate_v1(raw: &str, monitors: &[StextMonitor], names: &dyn Fn(&str) -> Option<(String, String)>) -> Result<Config, MigrationError>`, `parse_set_value(&str) -> Option<(String, u16)>`
+- Produces: `MigrationError`, `Config::migrate_v1(raw: &str, monitors: &[StextMonitor], names: &dyn Fn(&str) -> Option<(String, String)>) -> Result<Config, MigrationError>`, `parse_set_value(&str) -> Option<(String, u16)>`
 
 The serial resolver and the name resolver are passed in as data/closures rather than called directly, so migration is fully testable without Windows.
 
