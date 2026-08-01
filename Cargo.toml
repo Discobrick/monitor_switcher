@@ -13,10 +13,10 @@ windows = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
 ] }
-hidapi = "2.6"
 tray-icon = "0.14"
 
 [dev-dependencies]
