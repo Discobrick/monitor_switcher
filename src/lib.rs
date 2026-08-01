@@ -1,4 +1,3 @@
-// ponytail: exists only so `cargo test --lib` can exercise `config` without
-// linking the tray-icon binary (which needs system libxdo, absent on this
-// Linux dev box). main.rs keeps its own `mod config;` for the real binary.
+// Module root. main.rs is a thin binary entry point; real modules (hardware,
+// watcher, ui, ...) get added here as later tasks land.
 pub mod config;

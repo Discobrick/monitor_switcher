@@ -49,9 +49,9 @@ pub struct Config {
     pub monitoring_enabled: bool,
     /// Empty means "look next to the executable".
     pub control_my_monitor_path: String,
-    #[serde(default, rename = "devices")]
+    #[serde(default)]
     pub devices: Vec<DeviceEntry>,
-    #[serde(default, rename = "monitors")]
+    #[serde(default)]
     pub monitors: Vec<MonitorRule>,
 }
 
@@ -90,13 +90,32 @@ impl Config {
         match toml::from_str::<Config>(&raw) {
             Ok(c) => Ok(c),
             Err(_) => {
-                let broken = dir.join(format!("{CONFIG_FILE}.broken"));
-                let _ = std::fs::rename(&path, &broken);
+                // Quarantine to a name nothing else can be sitting on, and
+                // propagate a failed rename instead of falling through to
+                // overwrite `path` with defaults. Either way the original
+                // bytes survive, or the caller gets an Err and finds out.
+                let broken = Self::quarantine_path(dir);
+                std::fs::rename(&path, &broken)
+                    .map_err(|source| ConfigError::Io { path: path.clone(), source })?;
                 let c = Config::default();
                 c.save(dir)?;
                 Ok(c)
             }
         }
+    }
+
+    /// Picks `config.toml.broken`, or a timestamped variant if that name is
+    /// already occupied by an earlier quarantine.
+    fn quarantine_path(dir: &Path) -> PathBuf {
+        let base = dir.join(format!("{CONFIG_FILE}.broken"));
+        if !base.exists() {
+            return base;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        dir.join(format!("{CONFIG_FILE}.broken.{nanos}"))
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), ConfigError> {
@@ -164,5 +183,34 @@ mod tests {
         let c = Config::load(dir.path()).unwrap();
         assert_eq!(c.cooldown_secs, 60);
         assert!(dir.path().join("config.toml.broken").exists());
+    }
+
+    #[test]
+    fn corrupt_file_survives_when_broken_name_already_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml.broken"), "already broken").unwrap();
+        std::fs::write(dir.path().join("config.toml"), "still bad toml").unwrap();
+
+        let c = Config::load(dir.path()).unwrap();
+        assert_eq!(c.cooldown_secs, 60);
+
+        // The earlier quarantine file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml.broken")).unwrap(),
+            "already broken"
+        );
+
+        // The newly-corrupt bytes are recoverable somewhere on disk, not
+        // silently dropped by an overwrite.
+        let recovered = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config.toml.broken.")
+            })
+            .map(|e| std::fs::read_to_string(e.path()).unwrap());
+        assert_eq!(recovered.as_deref(), Some("still bad toml"));
     }
 }
