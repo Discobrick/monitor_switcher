@@ -112,6 +112,108 @@ pub struct MonitorInfo {
     pub current_input: Option<u16>,
 }
 
+/// One monitor's virtual-desktop rectangle, as reported by GDI.
+///
+/// Split out from the Win32 enumeration so the correlation with the
+/// ControlMyMonitor dump — the part with actual logic in it — is testable on
+/// every platform.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorGeometry {
+    /// `\\.\DISPLAY1` — the adapter device, with no `\Monitor0` suffix.
+    pub device: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub is_primary: bool,
+}
+
+/// `\\.\DISPLAY1\Monitor0` -> `\\.\DISPLAY1`, the form GDI reports.
+///
+/// Only a trailing `\MonitorN` is removed. Splitting on the last backslash
+/// unconditionally would turn a dump that already names the adapter alone into
+/// the bare `\\.` prefix, which then matches every monitor.
+pub fn display_prefix(device_name: &str) -> &str {
+    match device_name.rsplit_once('\\') {
+        Some((head, tail)) if tail.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("monitor")) => {
+            head
+        }
+        _ => device_name,
+    }
+}
+
+/// Merges ControlMyMonitor identity with GDI geometry.
+///
+/// Identity drives the result: a monitor DDC/CI cannot describe is one the app
+/// cannot switch, so the dump is the source of truth for which monitors exist.
+/// Geometry is joined on the `\\.\DISPLAYn` prefix that both sides report, and
+/// a monitor GDI does not place falls back to a plausible rectangle rather than
+/// disappearing from the list.
+pub fn combine(stext: Vec<parse::StextMonitor>, gdi: &[MonitorGeometry]) -> Vec<MonitorInfo> {
+    stext
+        .into_iter()
+        .map(|s| {
+            let g = gdi
+                .iter()
+                .find(|g| g.device.eq_ignore_ascii_case(display_prefix(&s.device_name)));
+
+            MonitorInfo {
+                serial: s.serial,
+                model: s.model,
+                device_name: s.device_name,
+                x: g.map_or(0, |g| g.x),
+                y: g.map_or(0, |g| g.y),
+                width: g.map_or(1920, |g| g.width),
+                height: g.map_or(1080, |g| g.height),
+                is_primary: g.is_some_and(|g| g.is_primary),
+                current_input: s.current_input,
+            }
+        })
+        .collect()
+}
+
+/// Picks the VCP 60 value of the monitor with the given serial.
+pub fn input_for_serial(monitors: &[parse::StextMonitor], serial: &str) -> Result<u16, HardwareError> {
+    monitors
+        .iter()
+        .find(|m| m.serial == serial)
+        .and_then(|m| m.current_input)
+        .ok_or_else(|| HardwareError::UnknownSerial(serial.to_string()))
+}
+
+/// Decodes a `/stext` dump, which ControlMyMonitor writes as UTF-16 or ANSI
+/// depending on how it was invoked. Reading the BOM covers both without a
+/// command-line flag to force one.
+pub fn decode_dump(bytes: &[u8]) -> String {
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => decode_utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => decode_utf16(rest, u16::from_be_bytes),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+fn decode_utf16(bytes: &[u8], to_unit: fn([u8; 2]) -> u16) -> String {
+    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| to_unit([c[0], c[1]])).collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// Turns a non-zero ControlMyMonitor exit into an error.
+///
+/// The tool is silent on stderr for most failures, so the exit code is kept as
+/// the fallback detail rather than reporting an empty message.
+pub fn tool_error(code: Option<i32>, stderr: &[u8]) -> HardwareError {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    HardwareError::ToolFailed(if stderr.is_empty() {
+        match code {
+            Some(code) => format!("exit code {code}"),
+            None => "terminated by a signal".to_string(),
+        }
+    } else {
+        stderr
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HardwareError {
     #[error("ControlMyMonitor.exe not found at {0}")]
@@ -219,5 +321,201 @@ mod tests {
         merge(&mut out, dev("VID_046D&PID_085C", "Camera", DeviceClass::Camera), NameSource::FriendlyName);
 
         assert_eq!(out.len(), 2);
+    }
+
+    // -- monitor correlation ------------------------------------------------
+
+    fn stext(device_name: &str, serial: &str, input: Option<u16>) -> parse::StextMonitor {
+        parse::StextMonitor {
+            device_name: device_name.into(),
+            model: "DELL U2720Q".into(),
+            serial: serial.into(),
+            current_input: input,
+        }
+    }
+
+    fn geom(device: &str, x: i32, y: i32, w: i32, h: i32, primary: bool) -> MonitorGeometry {
+        MonitorGeometry { device: device.into(), x, y, width: w, height: h, is_primary: primary }
+    }
+
+    #[test]
+    fn the_monitor_suffix_is_stripped_to_the_gdi_device() {
+        assert_eq!(display_prefix(r"\\.\DISPLAY1\Monitor0"), r"\\.\DISPLAY1");
+    }
+
+    /// A dump that reports the adapter alone must not be truncated to `\\.`.
+    #[test]
+    fn a_name_with_no_monitor_suffix_is_left_alone() {
+        assert_eq!(display_prefix(r"\\.\DISPLAY1"), r"\\.\DISPLAY1");
+        assert_eq!(display_prefix("DISPLAY1"), "DISPLAY1");
+    }
+
+    #[test]
+    fn geometry_is_joined_onto_identity_by_display_prefix() {
+        let out = combine(
+            vec![stext(r"\\.\DISPLAY2\Monitor0", "XYZ987654", Some(17))],
+            &[
+                geom(r"\\.\DISPLAY1", 0, 0, 3840, 2160, true),
+                geom(r"\\.\DISPLAY2", 3840, -400, 1080, 1920, false),
+            ],
+        );
+
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].x, out[0].y, out[0].width, out[0].height), (3840, -400, 1080, 1920));
+        assert!(!out[0].is_primary);
+        assert_eq!(out[0].serial, "XYZ987654");
+        assert_eq!(out[0].current_input, Some(17));
+    }
+
+    /// GDI reports `\\.\DISPLAY1` while some dumps carry `\\.\Display1`.
+    #[test]
+    fn the_join_ignores_case() {
+        let out = combine(
+            vec![stext(r"\\.\Display1\Monitor0", "ABC123456", Some(15))],
+            &[geom(r"\\.\DISPLAY1", 100, 200, 2560, 1440, true)],
+        );
+
+        assert_eq!((out[0].x, out[0].y, out[0].width, out[0].height), (100, 200, 2560, 1440));
+        assert!(out[0].is_primary);
+    }
+
+    /// Identity, not geometry, decides what exists: an unmatched monitor is
+    /// still switchable, so it keeps its place in the list.
+    #[test]
+    fn a_monitor_gdi_does_not_place_survives_with_a_fallback_rect() {
+        let out = combine(
+            vec![stext(r"\\.\DISPLAY9\Monitor0", "NOGDI0001", Some(18))],
+            &[geom(r"\\.\DISPLAY1", 0, 0, 3840, 2160, true)],
+        );
+
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].x, out[0].y, out[0].width, out[0].height), (0, 0, 1920, 1080));
+        assert!(!out[0].is_primary);
+    }
+
+    /// A prefix must not match a longer one that merely starts the same way.
+    #[test]
+    fn display1_does_not_borrow_display10s_geometry() {
+        let out = combine(
+            vec![stext(r"\\.\DISPLAY1\Monitor0", "ABC123456", None)],
+            &[geom(r"\\.\DISPLAY10", 5000, 0, 1280, 720, false)],
+        );
+
+        assert_eq!((out[0].width, out[0].height), (1920, 1080));
+    }
+
+    #[test]
+    fn combine_preserves_dump_order_for_every_monitor() {
+        let out = combine(
+            vec![
+                stext(r"\\.\DISPLAY1\Monitor0", "AAA", Some(15)),
+                stext(r"\\.\DISPLAY2\Monitor0", "BBB", Some(17)),
+                stext(r"\\.\DISPLAY3\Monitor0", "CCC", None),
+            ],
+            &[geom(r"\\.\DISPLAY3", -1920, 300, 1920, 1080, false)],
+        );
+
+        let serials: Vec<&str> = out.iter().map(|m| m.serial.as_str()).collect();
+        assert_eq!(serials, ["AAA", "BBB", "CCC"]);
+        assert_eq!(out[2].x, -1920);
+    }
+
+    // -- serial lookup ------------------------------------------------------
+
+    #[test]
+    fn the_input_is_looked_up_by_serial_not_position() {
+        let monitors = vec![
+            stext(r"\\.\DISPLAY1\Monitor0", "AAA", Some(15)),
+            stext(r"\\.\DISPLAY2\Monitor0", "BBB", Some(17)),
+        ];
+        assert_eq!(input_for_serial(&monitors, "BBB").unwrap(), 17);
+    }
+
+    #[test]
+    fn an_absent_serial_is_reported_as_unknown() {
+        let err = input_for_serial(&[], "GONE").unwrap_err();
+        assert!(matches!(err, HardwareError::UnknownSerial(s) if s == "GONE"));
+    }
+
+    /// A monitor whose dump had no VCP 60 block is as unusable as a missing
+    /// one, and must not silently read as some default input.
+    #[test]
+    fn a_monitor_without_a_vcp60_block_is_not_readable() {
+        let monitors = vec![stext(r"\\.\DISPLAY1\Monitor0", "AAA", None)];
+        assert!(matches!(
+            input_for_serial(&monitors, "AAA"),
+            Err(HardwareError::UnknownSerial(_))
+        ));
+    }
+
+    // -- dump decoding ------------------------------------------------------
+
+    #[test]
+    fn a_utf16_le_dump_decodes_without_its_bom_or_nul_padding() {
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend("Monitor Name: DELL".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(decode_dump(&bytes), "Monitor Name: DELL");
+    }
+
+    #[test]
+    fn a_utf16_be_dump_decodes_too() {
+        let mut bytes = vec![0xFE, 0xFF];
+        bytes.extend("Serial: ABC123".encode_utf16().flat_map(u16::to_be_bytes));
+        assert_eq!(decode_dump(&bytes), "Serial: ABC123");
+    }
+
+    #[test]
+    fn a_utf8_bom_is_stripped_so_the_first_key_still_parses() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"Monitor Name: DELL");
+        assert_eq!(decode_dump(&bytes), "Monitor Name: DELL");
+    }
+
+    #[test]
+    fn a_plain_ansi_dump_is_passed_through() {
+        assert_eq!(decode_dump(b"Monitor Name: DELL"), "Monitor Name: DELL");
+    }
+
+    #[test]
+    fn an_empty_dump_decodes_to_an_empty_string() {
+        assert_eq!(decode_dump(&[]), "");
+        assert_eq!(decode_dump(&[0xFF, 0xFE]), "");
+    }
+
+    /// A decoded dump has to survive the real parser, not just compare equal.
+    #[test]
+    fn a_utf16_dump_round_trips_through_the_stext_parser() {
+        let text = "Monitor Device Name: \\\\.\\DISPLAY1\\Monitor0\r\n\
+                    Monitor Name: DELL U2720Q\r\n\
+                    Serial Number: ABC123456\r\n\
+                    VCP Code: 60\r\n\
+                    Current Value: 15\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+
+        let parsed = parse::parse_stext(&decode_dump(&bytes));
+        assert_eq!(parsed.len(), 1, "the decoded UTF-16 dump must parse");
+        assert_eq!(parsed[0].serial, "ABC123456");
+        assert_eq!(parsed[0].current_input, Some(15));
+    }
+
+    // -- tool exit status ---------------------------------------------------
+
+    #[test]
+    fn stderr_becomes_the_failure_detail_when_the_tool_says_anything() {
+        let err = tool_error(Some(1), b"  monitor not found\r\n");
+        assert!(matches!(err, HardwareError::ToolFailed(d) if d == "monitor not found"));
+    }
+
+    #[test]
+    fn a_silent_failure_falls_back_to_the_exit_code() {
+        let err = tool_error(Some(3), b"   \n");
+        assert!(matches!(err, HardwareError::ToolFailed(d) if d == "exit code 3"));
+    }
+
+    #[test]
+    fn a_signal_kill_is_reported_rather_than_shown_as_no_code() {
+        let err = tool_error(None, b"");
+        assert!(matches!(err, HardwareError::ToolFailed(d) if d == "terminated by a signal"));
     }
 }
