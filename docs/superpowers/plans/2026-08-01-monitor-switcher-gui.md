@@ -1607,7 +1607,7 @@ mod tests {
         let (mut s, t0) = state();
         s.evaluate(true, t0);
         s.evaluate(false, t0 + Duration::from_secs(1));      // switch, cooldown starts
-        s.evaluate(true, t0 + Duration::from_secs(5));       // suppressed, marks dirty
+        s.evaluate(true, t0 + Duration::from_secs(5));       // suppressed, resync owed
 
         // At expiry the real state is re-applied rather than left wrong.
         assert_eq!(s.tick(t0 + Duration::from_secs(62)), Some(Action::Resync));
@@ -1690,15 +1690,20 @@ pub struct WatcherState {
     /// `None` until the first evaluation, which only establishes a baseline.
     last_state: Option<bool>,
     cooldown_until: Option<Instant>,
-    /// Set when a change arrived during cooldown and still needs applying.
-    dirty: bool,
+    /// The presence value the monitors were last actually switched to. A resync
+    /// is owed only when this disagrees with `last_state` — a flip that returns
+    /// to the already-applied value must NOT trigger one.
+    applied: Option<bool>,
 }
 
 impl WatcherState {
     pub fn new(cooldown: Duration) -> Self {
-        Self { cooldown, last_state: None, cooldown_until: None, dirty: false }
+        Self { cooldown, last_state: None, cooldown_until: None, applied: None }
     }
 
+    /// Changing the cooldown does not resize one already in flight:
+    /// `cooldown_until` is an absolute instant computed when the switch fired.
+    /// The new value applies to the next cooldown.
     pub fn set_cooldown(&mut self, cooldown: Duration) {
         self.cooldown = cooldown;
     }
@@ -1714,12 +1719,12 @@ impl WatcherState {
     pub fn evaluate(&mut self, present: bool, now: Instant) -> Option<Action> {
         let Some(previous) = self.last_state else {
             self.last_state = Some(present);
+            self.applied = Some(present);
             return None;
         };
 
         if self.in_cooldown(now) {
             if present != previous {
-                self.dirty = true;
                 self.last_state = Some(present);
             }
             return None;
@@ -1730,22 +1735,25 @@ impl WatcherState {
         }
 
         self.last_state = Some(present);
-        self.cooldown_until = Some(now + self.cooldown);
-        self.dirty = false;
+        self.applied = Some(present);
+        self.cooldown_until = Some(self.arm(now));
 
         Some(if present { Action::Connect } else { Action::Disconnect })
     }
 
     /// Called periodically by the watcher thread to release a cooldown.
+    ///
+    /// This MUST be polled. A caller that only ever calls `evaluate` never
+    /// delivers a flip that arrived mid-cooldown.
     pub fn tick(&mut self, now: Instant) -> Option<Action> {
         if self.in_cooldown(now) {
             return None;
         }
 
         let expired = self.cooldown_until.take().is_some();
-        if expired && self.dirty {
-            self.dirty = false;
-            self.cooldown_until = Some(now + self.cooldown);
+        if expired && self.last_state != self.applied {
+            self.applied = self.last_state;
+            self.cooldown_until = Some(self.arm(now));
             return Some(Action::Resync);
         }
         None
@@ -1755,6 +1763,12 @@ impl WatcherState {
         self.cooldown_until
             .filter(|until| *until > now)
             .map(|until| until - now)
+    }
+
+    /// `cooldown_secs` is unvalidated in the config, so saturate rather than
+    /// panic on `Instant` overflow.
+    fn arm(&self, now: Instant) -> Instant {
+        now.checked_add(self.cooldown).unwrap_or(now)
     }
 
     fn in_cooldown(&self, now: Instant) -> bool {
