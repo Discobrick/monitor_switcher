@@ -2,3 +2,4 @@
 // watcher, ui, ...) get added here as later tasks land.
 pub mod config;
 pub mod hardware;
+pub mod watcher;
