@@ -12,7 +12,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 };
 
 use super::parse::extract_id_from_instance;
-use super::{DeviceClass, HardwareError, UsbDevice};
+use super::{merge, DeviceClass, HardwareError, NameSource, UsbDevice};
 
 /// Owns the device info set so it is released on every exit path, including
 /// early returns and panics.
@@ -31,16 +31,16 @@ impl Drop for DevInfoSet {
 /// Enumerates every present device, keeping those carrying a VID/PID pair.
 ///
 /// One physical device produces several device nodes (composite interfaces,
-/// child HID collections), so results are deduplicated by VID&PID and the
-/// most specific name wins.
+/// child HID collections), so results are deduplicated by VID&PID by
+/// `super::merge`, which resolves the name and class across those nodes.
 pub fn list_devices() -> Result<Vec<UsbDevice>, HardwareError> {
-    let mut out: Vec<UsbDevice> = Vec::new();
+    let mut merged: Vec<(UsbDevice, NameSource)> = Vec::new();
 
     // SAFETY: SetupDiGetClassDevsW with a null class GUID and DIGCF_ALLCLASSES
     // returns a handle to all present devices, released by `DevInfoSet::drop`.
     let devinfo = DevInfoSet(unsafe {
         SetupDiGetClassDevsW(None, PCWSTR::null(), None, DIGCF_PRESENT | DIGCF_ALLCLASSES)
-            .map_err(|e| HardwareError::ToolFailed(format!("SetupDiGetClassDevs failed: {e}")))?
+            .map_err(|e| HardwareError::Win32(format!("SetupDiGetClassDevs failed: {e}")))?
     });
 
     for index in 0.. {
@@ -62,29 +62,24 @@ pub fn list_devices() -> Result<Vec<UsbDevice>, HardwareError> {
             continue;
         };
 
-        let name = registry_string(devinfo.0, &data, SPDRP_FRIENDLYNAME)
-            .or_else(|| registry_string(devinfo.0, &data, SPDRP_DEVICEDESC))
-            .unwrap_or_else(|| id.clone());
+        // The provenance is carried into the merge so that a friendly name from
+        // any node outranks a description from any other, whatever the order.
+        let (name, source) = registry_string(devinfo.0, &data, SPDRP_FRIENDLYNAME)
+            .map(|n| (n, NameSource::FriendlyName))
+            .or_else(|| {
+                registry_string(devinfo.0, &data, SPDRP_DEVICEDESC)
+                    .map(|n| (n, NameSource::DeviceDesc))
+            })
+            .unwrap_or_else(|| (id.clone(), NameSource::Placeholder));
 
         let class = registry_string(devinfo.0, &data, SPDRP_CLASS)
             .map(|c| DeviceClass::from_setup_class(&c))
             .unwrap_or(DeviceClass::Other);
 
-        match out.iter_mut().find(|d| d.id == id) {
-            Some(existing) => {
-                // Prefer a real name over a placeholder, and a specific class
-                // over Other, whichever node happens to be enumerated first.
-                if existing.name == existing.id && name != id {
-                    existing.name = name;
-                }
-                if existing.class == DeviceClass::Other && class != DeviceClass::Other {
-                    existing.class = class;
-                }
-            }
-            None => out.push(UsbDevice { id, name, class }),
-        }
+        merge(&mut merged, UsbDevice { id, name, class }, source);
     }
 
+    let mut out: Vec<UsbDevice> = merged.into_iter().map(|(d, _)| d).collect();
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
 }

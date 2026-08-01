@@ -101,7 +101,7 @@ This script will display the Device Name, the Hardware ID (VID/PID), and the Act
     *   The `PID_` part followed by 4 hex characters is your Product ID (e.g., `085C`).
 8.  Combine them into the format `VID_XXXX&PID_YYYY` and add it to your `config.toml`.
 
-**Note:** The application uses the `hidapi` library, so it can only detect devices that expose an HID (Human Interface Device) interface. Most keyboards, mice, and USB controllers do this.
+**Note:** The application enumerates devices through the Windows SetupAPI, so it sees everything Device Manager shows — not just devices exposing an HID (Human Interface Device) interface. Webcams, hubs and other non-HID devices work too.
 
 ## How to find Monitor Input values
 
