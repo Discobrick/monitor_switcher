@@ -1,5 +1,7 @@
 #![windows_subsystem = "windows"] // Commented out so you can see the console
 
+mod config;
+
 use std::process::Command;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
