@@ -118,6 +118,295 @@ impl WatcherState {
     }
 }
 
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
+
+use crate::app::{Command, Event, LogEntry, Severity};
+use crate::config::Config;
+use crate::hardware;
+
+/// Current time of day, UTC, formatted `HH:MM:SS`. No timezone conversion —
+/// this is a display timestamp, not a wall-clock claim.
+fn now_string() -> String {
+    // ponytail: no chrono dependency for one timestamp. SystemTime -> HH:MM:SS
+    // via seconds-of-day arithmetic; the date is never displayed.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let sod = secs % 86_400;
+    format!("{:02}:{:02}:{:02}", sod / 3600, (sod % 3600) / 60, sod % 60)
+}
+
+pub fn log(tx: &Sender<Event>, severity: Severity, message: impl Into<String>) {
+    let _ = tx.send(Event::Log(LogEntry {
+        at: now_string(),
+        severity,
+        message: message.into(),
+    }));
+}
+
+/// Applies every configured rule for the given presence state.
+fn apply_all(cfg: &Config, dir: &PathBuf, present: bool, tx: &Sender<Event>) {
+    let tool = crate::app::tool_path(cfg, dir);
+
+    for rule in &cfg.monitors {
+        if rule.serial.is_empty() {
+            log(
+                tx,
+                Severity::Warning,
+                format!("Skipping \"{}\": no serial, re-detect it in Monitors", rule.label),
+            );
+            continue;
+        }
+
+        let value = if present { rule.on_connect } else { rule.on_disconnect };
+        match hardware::apply_input(&tool, &rule.serial, value) {
+            Ok(()) => log(tx, Severity::Success, format!("{} -> input {}", rule.label, value)),
+            Err(e) => log(tx, Severity::Error, format!("{} failed: {e}", rule.label)),
+        }
+    }
+}
+
+fn any_watched_present(cfg: &Config) -> bool {
+    match hardware::list_devices() {
+        Ok(devices) => devices.iter().any(|d| cfg.watches(&d.id)),
+        Err(_) => false,
+    }
+}
+
+/// Runs the watcher loop until a `Command::Shutdown` arrives, or `commands`
+/// disconnects (the UI side was dropped, e.g. during shutdown) — both are a
+/// normal exit, not an error.
+///
+/// `wake` is signalled by the platform layer whenever a device change is
+/// observed; on Windows that is the hidden window's WM_DEVICECHANGE handler,
+/// on other targets it is the debug panel.
+pub fn run(
+    cfg: Arc<Mutex<Config>>,
+    dir: PathBuf,
+    tx: Sender<Event>,
+    commands: Receiver<Command>,
+    wake: Receiver<()>,
+) {
+    let cooldown = {
+        let c = cfg.lock().expect("config poisoned");
+        Duration::from_secs(c.cooldown_secs)
+    };
+    let mut state = WatcherState::new(cooldown);
+    let mut enabled = cfg.lock().expect("config poisoned").monitoring_enabled;
+
+    // Establish the baseline without switching anything.
+    {
+        let c = cfg.lock().expect("config poisoned");
+        let present = any_watched_present(&c);
+        state.evaluate(present, Instant::now());
+        let _ = tx.send(Event::PresenceChanged(present));
+    }
+
+    let mut last_cooldown_report: Option<u64> = None;
+
+    loop {
+        match commands.try_recv() {
+            Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => return,
+            Ok(Command::SetMonitoring(on)) => enabled = on,
+            Ok(Command::ConfigChanged) => {
+                let c = cfg.lock().expect("config poisoned");
+                state.set_cooldown(Duration::from_secs(c.cooldown_secs));
+                enabled = c.monitoring_enabled;
+            }
+            Ok(Command::Poke) | Err(TryRecvError::Empty) => {}
+        }
+
+        // Coalesce a burst of device-change notifications: a KVM toggle fires
+        // several. Drain everything that arrived, then let it settle.
+        let woken = wake.try_recv().is_ok();
+        if woken {
+            std::thread::sleep(Duration::from_millis(500));
+            while wake.try_recv().is_ok() {}
+        }
+
+        let now = Instant::now();
+
+        if enabled && woken {
+            let c = cfg.lock().expect("config poisoned");
+            let present = any_watched_present(&c);
+
+            if state.last_state() != Some(present) {
+                let _ = tx.send(Event::PresenceChanged(present));
+            }
+
+            if let Some(action) = state.evaluate(present, now) {
+                let label = match action {
+                    Action::Connect => "Watched device connected",
+                    Action::Disconnect => "Watched device disconnected",
+                    Action::Resync => "Resyncing after cooldown",
+                };
+                log(&tx, Severity::Info, label);
+                apply_all(&c, &dir, present, &tx);
+            }
+        }
+
+        if enabled && let Some(action) = state.tick(now) {
+            debug_assert_eq!(action, Action::Resync);
+            let c = cfg.lock().expect("config poisoned");
+            let present = any_watched_present(&c);
+            log(&tx, Severity::Info, "Cooldown expired, resyncing monitors");
+            apply_all(&c, &dir, present, &tx);
+        }
+
+        let remaining = state.cooldown_remaining(now).map(|d| d.as_secs());
+        if remaining != last_cooldown_report {
+            let _ = tx.send(Event::Cooldown(remaining));
+            last_cooldown_report = remaining;
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Starts the platform's device-change notifier, returning the wake receiver.
+///
+/// On Windows this spawns the hidden-window message pump that has always
+/// driven this application. On other targets there is no such thing, so the
+/// sender is handed back too (Task 11's debug panel uses it to simulate a
+/// device-change notification).
+#[cfg(windows)]
+pub fn spawn_wake_source() -> (Receiver<()>, Option<Sender<()>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || win::pump(tx));
+    (rx, None)
+}
+
+#[cfg(not(windows))]
+pub fn spawn_wake_source() -> (Receiver<()>, Option<Sender<()>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    (rx, Some(tx))
+}
+
+/// Spawns the watcher thread and its wake source, returning the command
+/// channel the caller uses to talk to it.
+///
+/// On non-Windows targets the debug-panel wake sender has no owner yet (it
+/// arrives with Task 11's debug panel), so it is dropped here; until then the
+/// watcher simply never wakes on its own outside tests, which drive `run`
+/// directly.
+pub fn spawn(cfg: Arc<Mutex<Config>>, dir: PathBuf, tx: Sender<Event>) -> Sender<Command> {
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+    let (wake_rx, _debug_wake) = spawn_wake_source();
+    std::thread::spawn(move || run(cfg, dir, tx, cmd_rx, wake_rx));
+    cmd_tx
+}
+
+#[cfg(windows)]
+mod win {
+    use std::sync::mpsc::Sender;
+    use std::sync::OnceLock;
+
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::HBRUSH;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
+        RegisterClassW, TranslateMessage, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_DEVICECHANGE,
+        WNDCLASSW, WS_OVERLAPPED,
+    };
+
+    static WAKE: OnceLock<Sender<()>> = OnceLock::new();
+
+    const DBT_DEVNODES_CHANGED: usize = 0x0007;
+    const DBT_DEVICEARRIVAL: usize = 0x8000;
+    const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
+
+    /// Creates a hidden message-only-ish window and pumps messages forever.
+    ///
+    /// A top-level window receives DBT_DEVNODES_CHANGED broadcasts without
+    /// RegisterDeviceNotification, which is why no registration happens here.
+    pub fn pump(tx: Sender<()>) {
+        let _ = WAKE.set(tx);
+
+        // SAFETY: GetModuleHandleW(None) returns this process's base address and
+        // mutates nothing.
+        let Ok(instance) = (unsafe { GetModuleHandleW(None) }) else {
+            return;
+        };
+
+        let class_name = w!("MONITOR_SWITCHER_WATCHER");
+        let wnd_class = WNDCLASSW {
+            hInstance: instance.into(),
+            lpszClassName: class_name,
+            lpfnWndProc: Some(wnd_proc),
+            hbrBackground: HBRUSH(0),
+            ..Default::default()
+        };
+
+        // SAFETY: the class name and window procedure are defined in this
+        // module and outlive the window.
+        unsafe {
+            if RegisterClassW(&raw const wnd_class) == 0 {
+                return;
+            }
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                PCWSTR::null(),
+                WS_OVERLAPPED,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                instance,
+                None,
+            );
+            if hwnd.0 == 0 {
+                return;
+            }
+        }
+
+        let mut message = MSG::default();
+        // SAFETY: standard Win32 message loop; GetMessageW blocks until a
+        // message arrives and returns 0 on WM_QUIT.
+        unsafe {
+            loop {
+                let result = GetMessageW(&raw mut message, None, 0, 0);
+                if result.0 <= 0 {
+                    return;
+                }
+                TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
+        }
+    }
+
+    unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        match msg {
+            WM_DEVICECHANGE => {
+                if matches!(
+                    wparam.0,
+                    DBT_DEVNODES_CHANGED | DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE
+                ) && let Some(tx) = WAKE.get()
+                {
+                    // Debounce and settle-delay live in the watcher loop, so
+                    // this handler stays cheap and never blocks the pump.
+                    let _ = tx.send(());
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                // SAFETY: valid during window destruction.
+                unsafe { PostQuitMessage(0) };
+                LRESULT(0)
+            }
+            // SAFETY: the documented fallback for unhandled messages.
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
