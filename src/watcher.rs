@@ -295,17 +295,17 @@ pub fn spawn_wake_source(_log_tx: Sender<Event>) -> (Receiver<()>, Option<Sender
 }
 
 /// Spawns the watcher thread and its wake source, returning the command
-/// channel the caller uses to talk to it.
-///
-/// On non-Windows targets the debug-panel wake sender has no owner yet (it
-/// arrives with Task 11's debug panel), so it is dropped here; until then the
-/// watcher simply never wakes on its own outside tests, which drive `run`
-/// directly.
-pub fn spawn(cfg: Arc<Mutex<Config>>, dir: PathBuf, tx: Sender<Event>) -> Sender<Command> {
+/// channel the caller uses to talk to it, plus the debug-panel wake sender
+/// (`None` on Windows, where `WM_DEVICECHANGE` is the only wake source).
+pub fn spawn(
+    cfg: Arc<Mutex<Config>>,
+    dir: PathBuf,
+    tx: Sender<Event>,
+) -> (Sender<Command>, Option<Sender<()>>) {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-    let (wake_rx, _debug_wake) = spawn_wake_source(tx.clone());
+    let (wake_rx, debug_wake) = spawn_wake_source(tx.clone());
     std::thread::spawn(move || run(cfg, dir, tx, cmd_rx, wake_rx));
-    cmd_tx
+    (cmd_tx, debug_wake)
 }
 
 #[cfg(windows)]
@@ -792,6 +792,113 @@ mod run_tests {
             }
         };
         assert!(saw_it, "Poke should force a presence re-check with no wake signal and no wait");
+
+        cmd_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        hardware::set_device_present(device_id, true);
+    }
+
+    /// The gap this task closes: `spawn()` must hand its caller a working
+    /// wake sender on non-Windows targets, not silently drop it. Exercises
+    /// the exact plumbing the debug panel depends on — `spawn()`'s returned
+    /// sender, not `run()`'s raw channel.
+    #[test]
+    fn spawn_returns_a_wake_sender_that_pokes_the_watcher() {
+        let device_id = "VID_145F&PID_02A2"; // mock's generic HID device, unused elsewhere
+        hardware::set_device_present(device_id, false);
+
+        let mut cfg = Config::default();
+        cfg.devices.push(DeviceEntry { id: device_id.into(), name: "HID".into(), class: "HIDClass".into() });
+        cfg.monitors.push(rule("XYZ987654"));
+        let cfg = Arc::new(Mutex::new(cfg));
+
+        let (event_tx, event_rx) = channel();
+        let (cmd_tx, wake_tx) = spawn(cfg, PathBuf::from("/opt"), event_tx);
+        let wake_tx = wake_tx.expect("spawn() must return a wake sender on non-Windows targets");
+
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Event::PresenceChanged(false)) => break,
+                Ok(_) => continue,
+                Err(_) => panic!("run never reported its baseline presence"),
+            }
+        }
+
+        hardware::set_device_present(device_id, true);
+        wake_tx.send(()).unwrap();
+
+        let saw_it = loop {
+            match event_rx.recv_timeout(Duration::from_secs(3)) {
+                Ok(Event::PresenceChanged(true)) => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        };
+        assert!(saw_it, "the wake sender returned by spawn() must cause a presence re-check");
+
+        cmd_tx.send(Command::Shutdown).unwrap();
+        hardware::set_device_present(device_id, true);
+    }
+
+    /// Mirrors the "Rapid toggle x6" debug button's send pattern (six
+    /// presence flips + wakes fired back-to-back, no delay). Confirms only
+    /// one net `PresenceChanged` reaches the UI, reflecting the final state.
+    ///
+    /// This does NOT prove the 500ms drain in `run` is what causes that —
+    /// mutation-testing this file by deleting the drain left the result
+    /// unchanged, because `WatcherState::evaluate` already ignores a reading
+    /// that repeats the current state, and by the time `run` looks at the
+    /// mock at all every send below has already landed (they're synchronous,
+    /// sub-microsecond calls). See the task report for why the drain's actual
+    /// effect (fewer redundant hardware polls, not fewer switches) isn't
+    /// independently observable through this mock. Drives `run` directly
+    /// (rather than `set_all_present`, which flips every mock device at once
+    /// and would race with every other test in this binary).
+    #[test]
+    fn rapid_presence_flips_converge_on_a_single_net_change() {
+        let device_id = "VID_1462&PID_7C95"; // mock's other generic HID device, unused elsewhere
+        hardware::set_device_present(device_id, true);
+
+        let mut cfg = Config::default();
+        cfg.devices.push(DeviceEntry { id: device_id.into(), name: "HID".into(), class: "HIDClass".into() });
+        cfg.monitors.push(rule("XYZ987654"));
+        let cfg = Arc::new(Mutex::new(cfg));
+
+        let (event_tx, event_rx) = channel();
+        let (cmd_tx, cmd_rx) = channel();
+        let (wake_tx, wake_rx) = channel::<()>();
+
+        let handle = std::thread::spawn(move || run(cfg, PathBuf::from("/opt"), event_tx, cmd_rx, wake_rx));
+
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Event::PresenceChanged(true)) => break,
+                Ok(_) => continue,
+                Err(_) => panic!("run never reported its baseline presence"),
+            }
+        }
+
+        // Mirrors the debug panel's "Rapid toggle x6" loop: flip presence and
+        // poke six times, faster than the watcher can react to any single one.
+        for i in 0..6 {
+            hardware::set_device_present(device_id, i % 2 == 0);
+            wake_tx.send(()).unwrap();
+        }
+
+        let mut presence_events = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if let Ok(Event::PresenceChanged(p)) = event_rx.recv_timeout(Duration::from_millis(100)) {
+                presence_events.push(p);
+            }
+        }
+
+        assert_eq!(
+            presence_events,
+            vec![false],
+            "six rapid wake signals must coalesce into exactly one presence \
+             re-check, reflecting the final toggled state"
+        );
 
         cmd_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();

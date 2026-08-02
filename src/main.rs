@@ -13,16 +13,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared = Arc::new(Mutex::new(cfg.clone()));
 
     let (event_tx, event_rx) = channel();
-    let cmd_tx = watcher::spawn(Arc::clone(&shared), dir.clone(), event_tx);
+    let (cmd_tx, _wake_tx) = watcher::spawn(Arc::clone(&shared), dir.clone(), event_tx);
 
     let handles = ui::Handles {
         dir,
         shared_config: shared,
         commands: cmd_tx,
-        // ponytail: `watcher::spawn` owns and drops the non-Windows debug-wake
-        // sender internally (Task 11's debug panel is what wires it up).
         #[cfg(not(windows))]
-        wake: None,
+        wake: _wake_tx,
     };
 
     ui::launch(cfg, handles, event_rx);
