@@ -49,8 +49,10 @@ pub fn Debug() -> Element {
                     onclick: {
                         let poke = poke.clone();
                         move |_| {
-                            // Rapid toggle: exercises the 500ms settle window
-                            // and the cooldown suppression path.
+                            // Rapid toggle: six flips land before the watcher
+                            // next reads presence, so this checks that a burst
+                            // collapses to a single net change. It does not
+                            // reach the 500ms settle window or arm a cooldown.
                             for i in 0..6 {
                                 hardware::set_all_present(i % 2 == 0);
                                 poke();
