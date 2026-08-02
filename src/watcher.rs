@@ -118,7 +118,7 @@ impl WatcherState {
     }
 }
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
@@ -148,7 +148,7 @@ pub fn log(tx: &Sender<Event>, severity: Severity, message: impl Into<String>) {
 }
 
 /// Applies every configured rule for the given presence state.
-fn apply_all(cfg: &Config, dir: &PathBuf, present: bool, tx: &Sender<Event>) {
+fn apply_all(cfg: &Config, dir: &Path, present: bool, tx: &Sender<Event>) {
     let tool = crate::app::tool_path(cfg, dir);
 
     for rule in &cfg.monitors {
@@ -208,6 +208,7 @@ pub fn run(
     let mut last_cooldown_report: Option<u64> = None;
 
     loop {
+        let mut poked = false;
         match commands.try_recv() {
             Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => return,
             Ok(Command::SetMonitoring(on)) => enabled = on,
@@ -216,11 +217,14 @@ pub fn run(
                 state.set_cooldown(Duration::from_secs(c.cooldown_secs));
                 enabled = c.monitoring_enabled;
             }
-            Ok(Command::Poke) | Err(TryRecvError::Empty) => {}
+            Ok(Command::Poke) => poked = true,
+            Err(TryRecvError::Empty) => {}
         }
 
         // Coalesce a burst of device-change notifications: a KVM toggle fires
-        // several. Drain everything that arrived, then let it settle.
+        // several. Drain everything that arrived, then let it settle. A Poke
+        // is an explicit user request (Refresh button, debug panel), not a
+        // burst of hardware events to settle, so it skips this delay.
         let woken = wake.try_recv().is_ok();
         if woken {
             std::thread::sleep(Duration::from_millis(500));
@@ -229,7 +233,7 @@ pub fn run(
 
         let now = Instant::now();
 
-        if enabled && woken {
+        if enabled && (woken || poked) {
             let c = cfg.lock().expect("config poisoned");
             let present = any_watched_present(&c);
 
@@ -272,15 +276,20 @@ pub fn run(
 /// driven this application. On other targets there is no such thing, so the
 /// sender is handed back too (Task 11's debug panel uses it to simulate a
 /// device-change notification).
+///
+/// `log_tx` exists so a Windows pump that fails to start (window class or
+/// window creation failing) can say so instead of leaving `run` waiting on a
+/// wake channel that will now never fire — silent real-time detection loss
+/// otherwise has no diagnostic at all.
 #[cfg(windows)]
-pub fn spawn_wake_source() -> (Receiver<()>, Option<Sender<()>>) {
+pub fn spawn_wake_source(log_tx: Sender<Event>) -> (Receiver<()>, Option<Sender<()>>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || win::pump(tx));
+    std::thread::spawn(move || win::pump(tx, log_tx));
     (rx, None)
 }
 
 #[cfg(not(windows))]
-pub fn spawn_wake_source() -> (Receiver<()>, Option<Sender<()>>) {
+pub fn spawn_wake_source(_log_tx: Sender<Event>) -> (Receiver<()>, Option<Sender<()>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     (rx, Some(tx))
 }
@@ -294,7 +303,7 @@ pub fn spawn_wake_source() -> (Receiver<()>, Option<Sender<()>>) {
 /// directly.
 pub fn spawn(cfg: Arc<Mutex<Config>>, dir: PathBuf, tx: Sender<Event>) -> Sender<Command> {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-    let (wake_rx, _debug_wake) = spawn_wake_source();
+    let (wake_rx, _debug_wake) = spawn_wake_source(tx.clone());
     std::thread::spawn(move || run(cfg, dir, tx, cmd_rx, wake_rx));
     cmd_tx
 }
@@ -324,12 +333,19 @@ mod win {
     ///
     /// A top-level window receives DBT_DEVNODES_CHANGED broadcasts without
     /// RegisterDeviceNotification, which is why no registration happens here.
-    pub fn pump(tx: Sender<()>) {
+    ///
+    /// `log_tx` is only used to report a startup failure — the message loop
+    /// itself never sends anything through it. A failure here means the app
+    /// silently loses real-time device-change detection (it still catches up
+    /// on the next Poke or Resync), which is exactly the kind of thing that
+    /// must not fail quietly.
+    pub fn pump(tx: Sender<()>, log_tx: Sender<super::Event>) {
         let _ = WAKE.set(tx);
 
         // SAFETY: GetModuleHandleW(None) returns this process's base address and
         // mutates nothing.
         let Ok(instance) = (unsafe { GetModuleHandleW(None) }) else {
+            super::log(&log_tx, super::Severity::Error, "watcher: GetModuleHandleW failed, real-time device detection is disabled");
             return;
         };
 
@@ -346,6 +362,7 @@ mod win {
         // module and outlive the window.
         unsafe {
             if RegisterClassW(&raw const wnd_class) == 0 {
+                super::log(&log_tx, super::Severity::Error, "watcher: RegisterClassW failed, real-time device detection is disabled");
                 return;
             }
             let hwnd = CreateWindowExW(
@@ -363,6 +380,7 @@ mod win {
                 None,
             );
             if hwnd.0 == 0 {
+                super::log(&log_tx, super::Severity::Error, "watcher: CreateWindowExW failed, real-time device detection is disabled");
                 return;
             }
         }
@@ -656,5 +674,127 @@ mod tests {
         // Must not panic ("overflow when adding duration to instant").
         let action = s.evaluate(false, t0 + Duration::from_secs(1));
         assert_eq!(action, Some(Action::Disconnect));
+    }
+}
+
+/// Coverage for `apply_all`, `any_watched_present`, and `run`'s command
+/// handling — the non-OS logic that decides what to do with a drained batch
+/// of events and turns a `HardwareError` into a `LogEntry`. Only compiled
+/// where the mock hardware backend exists.
+///
+/// ponytail: the mock backend's device/monitor state is one process-wide
+/// `Mutex`, shared with every other test in this binary (see
+/// `hardware::mock`). Each test below picks fixture keys ("QWE555111", the
+/// mouse VID/PID) not touched by any test elsewhere in the crate, to keep
+/// this file's tests independent of that global state without owning a
+/// larger fix to the mock's design.
+#[cfg(all(test, not(windows)))]
+mod run_tests {
+    use super::*;
+    use crate::config::{Config, DeviceEntry, MonitorRule};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    fn rule(serial: &str) -> MonitorRule {
+        MonitorRule { serial: serial.into(), label: "Test monitor".into(), on_connect: 15, on_disconnect: 17 }
+    }
+
+    #[test]
+    fn apply_all_skips_a_rule_with_no_serial_and_warns_instead_of_calling_hardware() {
+        let (tx, rx) = channel();
+        let mut cfg = Config::default();
+        cfg.monitors.push(MonitorRule {
+            serial: String::new(),
+            label: "Unresolved monitor".into(),
+            on_connect: 15,
+            on_disconnect: 17,
+        });
+
+        apply_all(&cfg, Path::new("/opt"), true, &tx);
+
+        let Event::Log(entry) = rx.try_recv().expect("expected a log event") else {
+            panic!("expected a Log event");
+        };
+        assert_eq!(entry.severity, Severity::Warning);
+        assert!(entry.message.contains("Unresolved monitor"));
+        assert!(rx.try_recv().is_err(), "no hardware call means no further event");
+    }
+
+    #[test]
+    fn apply_all_logs_success_and_writes_the_input_on_a_working_monitor() {
+        let (tx, rx) = channel();
+        let mut cfg = Config::default();
+        cfg.monitors.push(rule("QWE555111"));
+
+        apply_all(&cfg, Path::new("/opt"), true, &tx);
+
+        let Event::Log(entry) = rx.try_recv().expect("expected a log event") else {
+            panic!("expected a Log event");
+        };
+        assert_eq!(entry.severity, Severity::Success);
+        assert_eq!(hardware::read_input(Path::new("x"), "QWE555111").unwrap(), 15);
+    }
+
+    #[test]
+    fn apply_all_logs_an_error_when_the_tool_fails() {
+        let (tx, rx) = channel();
+        let mut cfg = Config::default();
+        cfg.monitors.push(rule("QWE555111"));
+        hardware::set_fail_next_command(true);
+
+        apply_all(&cfg, Path::new("/opt"), true, &tx);
+
+        let Event::Log(entry) = rx.try_recv().expect("expected a log event") else {
+            panic!("expected a Log event");
+        };
+        assert_eq!(entry.severity, Severity::Error);
+    }
+
+    /// Regression test for the bug the review caught: `Command::Poke` used to
+    /// be dispatched to a no-op arm, so the Refresh button and debug panel
+    /// would silently do nothing. Presence here never changes on its own —
+    /// the wake channel is never signalled — so any presence re-check and
+    /// the resulting hardware apply can only be `run` honouring the Poke.
+    #[test]
+    fn poke_forces_an_immediate_recheck_without_a_wake_signal() {
+        let device_id = "VID_046D&PID_C08B"; // the mock's Logitech mouse
+        hardware::set_device_present(device_id, false);
+
+        let mut cfg = Config::default();
+        cfg.devices.push(DeviceEntry { id: device_id.into(), name: "Mouse".into(), class: "Mouse".into() });
+        cfg.monitors.push(rule("QWE555111"));
+        let cfg = Arc::new(Mutex::new(cfg));
+
+        let (event_tx, event_rx) = channel();
+        let (cmd_tx, cmd_rx) = channel();
+        let (_wake_tx, wake_rx) = channel::<()>(); // deliberately never signalled
+
+        let handle = std::thread::spawn(move || run(cfg, PathBuf::from("/opt"), event_tx, cmd_rx, wake_rx));
+
+        // Wait for the baseline "not present" read `run` does on startup,
+        // then flip the mock the way real hardware would and poke.
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Event::PresenceChanged(false)) => break,
+                Ok(_) => continue,
+                Err(_) => panic!("run never reported its baseline presence"),
+            }
+        }
+
+        hardware::set_device_present(device_id, true);
+        cmd_tx.send(Command::Poke).unwrap();
+
+        let saw_it = loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Event::PresenceChanged(true)) => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        };
+        assert!(saw_it, "Poke should force a presence re-check with no wake signal and no wait");
+
+        cmd_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        hardware::set_device_present(device_id, true);
     }
 }

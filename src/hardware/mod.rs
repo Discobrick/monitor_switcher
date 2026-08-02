@@ -17,7 +17,10 @@ pub use mon::{apply_input, list_monitors, read_input};
 pub use usb::list_devices;
 
 #[cfg(not(windows))]
-pub use mock::{apply_input, list_devices, list_monitors, read_input};
+pub use mock::{
+    apply_input, list_devices, list_monitors, read_input, set_all_present, set_device_present,
+    set_fail_next_command, set_tool_present,
+};
 
 /// Broad category used to pick the icon in the device picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
