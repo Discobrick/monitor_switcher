@@ -3,4 +3,5 @@
 pub mod app;
 pub mod config;
 pub mod hardware;
+pub mod ui;
 pub mod watcher;
