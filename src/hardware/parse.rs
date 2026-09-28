@@ -186,6 +186,7 @@ Monitor Name: "PHL 273V7"
 Serial Number: "UK02215042535"
 Adapter Name: "NVIDIA GeForce RTX 3080 Ti"
 Monitor ID: "MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007"
+Short Monitor ID: "PHLC156"
 "#;
 
     #[test]

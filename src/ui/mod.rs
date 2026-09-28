@@ -130,7 +130,7 @@ fn Root() -> Element {
         log: use_signal(Vec::new),
         present: use_signal(|| false),
         cooldown: use_signal(|| None),
-        tool_ok: use_signal(|| true),
+        tool_ok: use_signal(|| crate::deps::is_present(&tool_path(&props.initial, &props.handles.dir))),
         devices_rev: use_signal(|| 0),
         monitors: use_signal(|| None),
         supported_inputs: use_signal(HashMap::new),
