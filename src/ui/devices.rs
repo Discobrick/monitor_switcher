@@ -42,14 +42,33 @@ fn set_watched(mut config: Signal<Config>, handles: &Handles, d: &UsbDevice, on:
     config.set(c);
 }
 
-/// Renames a watched device; a blank label falls back to the hardware name.
-fn rename(mut config: Signal<Config>, handles: &Handles, d: &UsbDevice, label: &str) {
-    let mut c = config();
-    let Some(entry) = c.devices.iter_mut().find(|x| x.id == d.id) else { return };
-    let label = label.trim();
-    entry.name = if label.is_empty() { d.name.clone() } else { label.to_string() };
-    handles.save(&c);
-    config.set(c);
+/// A device's name: editable text for watched devices, plain text otherwise.
+/// A blank label falls back to `hw_name`.
+#[component]
+fn NameCell(id: String, hw_name: String) -> Element {
+    let mut config = use_context::<AppState>().config;
+    let handles = use_context::<Handles>();
+    let Some(label) = config().devices.iter().find(|e| e.id == id).map(|e| e.name.clone()) else {
+        return rsx! { "{hw_name}" };
+    };
+    rsx! {
+        input {
+            r#type: "text",
+            class: "rename",
+            value: "{label}",
+            title: "{hw_name}",
+            style: "width:100%",
+            onchange: move |e: Event<FormData>| {
+                let mut c = config();
+                let Some(entry) = c.devices.iter_mut().find(|x| x.id == id) else { return };
+                let label = e.value();
+                let label = label.trim();
+                entry.name = if label.is_empty() { hw_name.clone() } else { label.to_string() };
+                handles.save(&c);
+                config.set(c);
+            },
+        }
+    }
 }
 
 #[component]
@@ -168,7 +187,7 @@ pub fn Devices() -> Element {
                             for d in found() {
                                 tr { key: "{d.id}",
                                     td { "{icon(d.class)}" }
-                                    td { "{label(&d)}" }
+                                    td { NameCell { id: d.id.clone(), hw_name: d.name.clone() } }
                                     td { style: "color:var(--text-dim); font-family:monospace", "{d.id}" }
                                     td {
                                         input {
@@ -198,24 +217,7 @@ pub fn Devices() -> Element {
                         tr {
                             key: "{d.id}",
                             td { "{icon(d.class)}" }
-                            td {
-                                if cfg.watches(&d.id) {
-                                    input {
-                                        r#type: "text",
-                                        value: "{label(&d)}",
-                                        title: "{d.name}",
-                                        class: "rename",
-                                        style: "width:100%",
-                                        onchange: {
-                                            let handles = handles.clone();
-                                            let d = d.clone();
-                                            move |e: Event<FormData>| rename(config, &handles, &d, &e.value())
-                                        },
-                                    }
-                                } else {
-                                    "{d.name}"
-                                }
-                            }
+                            td { NameCell { id: d.id.clone(), hw_name: d.name.clone() } }
                             td { style: "color:var(--text-dim); font-family:monospace", "{d.id}" }
                             td {
                                 input {
@@ -240,7 +242,7 @@ pub fn Devices() -> Element {
                     tbody {
                         for e in absent {
                             tr { class: "absent", key: "{e.id}",
-                                td { "{e.name}" }
+                                td { NameCell { id: e.id.clone(), hw_name: e.name.clone() } }
                                 td { style: "font-family:monospace", "{e.id}" }
                                 td {
                                     button { class: "secondary",
