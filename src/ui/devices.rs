@@ -42,28 +42,39 @@ fn set_watched(mut config: Signal<Config>, handles: &Handles, d: &UsbDevice, on:
     config.set(c);
 }
 
-/// A device's name: editable text for watched devices, plain text otherwise.
-/// A blank label falls back to `hw_name`.
+/// User label, else the watched entry's cached name, else the hardware name.
+fn display_name(cfg: &Config, id: &str, hw_name: &str) -> String {
+    cfg.labels
+        .get(id)
+        .or_else(|| cfg.devices.iter().find(|e| e.id == id).map(|e| &e.name))
+        .map_or_else(|| hw_name.to_string(), String::clone)
+}
+
+/// An editable device name. Clearing it restores the hardware name.
 #[component]
 fn NameCell(id: String, hw_name: String) -> Element {
     let mut config = use_context::<AppState>().config;
     let handles = use_context::<Handles>();
-    let Some(label) = config().devices.iter().find(|e| e.id == id).map(|e| e.name.clone()) else {
-        return rsx! { "{hw_name}" };
-    };
+    let shown = display_name(&config(), &id, &hw_name);
     rsx! {
         input {
             r#type: "text",
             class: "rename",
-            value: "{label}",
+            value: "{shown}",
             title: "{hw_name}",
             style: "width:100%",
             onchange: move |e: Event<FormData>| {
                 let mut c = config();
-                let Some(entry) = c.devices.iter_mut().find(|x| x.id == id) else { return };
-                let label = e.value();
-                let label = label.trim();
-                entry.name = if label.is_empty() { hw_name.clone() } else { label.to_string() };
+                let label = e.value().trim().to_string();
+                if label.is_empty() {
+                    c.labels.remove(&id);
+                    // Also undo a name stored before labels existed.
+                    if let Some(entry) = c.devices.iter_mut().find(|x| x.id == id) {
+                        entry.name = hw_name.clone();
+                    }
+                } else {
+                    c.labels.insert(id.clone(), label);
+                }
                 handles.save(&c);
                 config.set(c);
             },
@@ -110,9 +121,7 @@ pub fn Devices() -> Element {
     let cfg = config();
     let needle = query().to_lowercase();
     let present = present_memo();
-    let label = |d: &UsbDevice| {
-        cfg.devices.iter().find(|e| e.id == d.id).map_or(d.name.clone(), |e| e.name.clone())
-    };
+    let label = |d: &UsbDevice| display_name(&cfg, &d.id, &d.name);
 
     // Configured devices that are not currently plugged in.
     let absent: Vec<_> = cfg
@@ -138,7 +147,7 @@ pub fn Devices() -> Element {
         h1 { "Devices" }
         p { style: "color:var(--text-dim); margin-top:-8px;",
             "Switch on the devices that move with your KVM. When any of them appears
-             or disappears, your monitors follow. Click a watched device's name to rename it."
+             or disappears, your monitors follow. Click any device's name to rename it."
         }
 
         div { style: "display:flex; gap:10px; align-items:center; margin-bottom:14px;",
@@ -284,5 +293,19 @@ mod tests {
         let ids: Vec<_> = changed(&before, &after).into_iter().map(|d| d.id).collect();
         assert_eq!(ids, ["A", "C"]);
         assert!(changed(&before, &before).is_empty());
+    }
+
+    #[test]
+    fn labels_win_over_cached_and_hardware_names_and_survive_toml() {
+        let mut cfg = Config::default();
+        let id = "VID_1E7D&PID_2CB2";
+        assert_eq!(display_name(&cfg, id, "USB Input Device"), "USB Input Device");
+
+        cfg.devices.push(DeviceEntry { id: id.into(), name: "Cached".into(), class: "HIDClass".into() });
+        assert_eq!(display_name(&cfg, id, "USB Input Device"), "Cached");
+
+        cfg.labels.insert(id.into(), "KVM Mouse".into());
+        let cfg: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(display_name(&cfg, id, "USB Input Device"), "KVM Mouse");
     }
 }

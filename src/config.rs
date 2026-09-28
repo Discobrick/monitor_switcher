@@ -53,6 +53,9 @@ pub struct Config {
     pub devices: Vec<DeviceEntry>,
     #[serde(default)]
     pub monitors: Vec<MonitorRule>,
+    /// User names for devices, keyed by id; any device can have one, watched or not.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -64,6 +67,7 @@ impl Default for Config {
             control_my_monitor_path: String::new(),
             devices: Vec::new(),
             monitors: Vec::new(),
+            labels: Default::default(),
         }
     }
 }

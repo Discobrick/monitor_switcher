@@ -101,8 +101,8 @@ input[type="text"], input[type="number"], select {
   border: 1px solid var(--border); border-radius: var(--radius);
   padding: 6px 8px; font: inherit;
 }
-input.rename { background: transparent; border-color: transparent; padding-left: 0; }
-input.rename:hover, input.rename:focus { background: var(--bg); border-color: var(--border); padding-left: 8px; }
+input.rename { background: transparent; border-color: transparent; padding: 2px 0; }
+input.rename:hover, input.rename:focus { background: var(--bg); border-color: var(--border); padding: 2px 8px; }
 
 .log {
   font-family: "Cascadia Mono", ui-monospace, monospace;
