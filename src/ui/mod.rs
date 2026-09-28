@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use dioxus::prelude::*;
 
-use crate::app::{Command, Event, LogEntry};
+use crate::app::{tool_path, Command, Event, LogEntry};
 use crate::config::Config;
+use crate::hardware::{self, MonitorInfo};
 
 const MAX_LOG: usize = 200;
 
@@ -37,6 +38,23 @@ pub struct AppState {
     pub tool_ok: Signal<bool>,
     /// Bumped on every USB change so device lists re-enumerate.
     pub devices_rev: Signal<u32>,
+    /// Last monitor scan; `None` while one is running. See `scan_monitors`.
+    pub monitors: Signal<Option<Result<Vec<MonitorInfo>, String>>>,
+}
+
+/// Enumerates monitors off the UI thread (the DDC reads take a few hundred ms)
+/// and stores the result in `target`. Runs once at launch and on Refresh.
+pub fn scan_monitors(mut target: Signal<Option<Result<Vec<MonitorInfo>, String>>>, tool: PathBuf) {
+    target.set(None);
+    let (tx, rx) = futures_channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(hardware::list_monitors(&tool).map_err(|e| e.to_string()));
+    });
+    spawn(async move {
+        if let Ok(result) = rx.await {
+            target.set(Some(result));
+        }
+    });
 }
 
 /// Shared handles the views need for side effects.
@@ -103,9 +121,11 @@ fn Root() -> Element {
         cooldown: use_signal(|| None),
         tool_ok: use_signal(|| true),
         devices_rev: use_signal(|| 0),
+        monitors: use_signal(|| None),
     };
     use_context_provider(|| state);
     use_context_provider(|| props.handles.clone());
+    use_hook(|| scan_monitors(state.monitors, tool_path(&props.initial, &props.handles.dir)));
 
     let tab = use_signal(|| Tab::Dashboard);
 

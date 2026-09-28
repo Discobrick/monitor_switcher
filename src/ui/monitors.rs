@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 
 use crate::app::tool_path;
 use crate::config::MonitorRule;
-use crate::hardware::{self, MonitorInfo};
-use crate::ui::{AppState, Handles};
+use crate::hardware::MonitorInfo;
+use crate::ui::{scan_monitors, AppState, Handles};
 
 /// Standard DDC/CI input-select values. Vendors deviate, which is why the
 /// custom field and the Test button exist.
@@ -74,18 +74,20 @@ pub fn Monitors() -> Element {
     let handles = use_context::<Handles>();
 
     let mut config = state.config;
-    let mut refresh = use_signal(|| 0u32);
     let mut selected = use_signal(|| 0usize);
 
-    let dir = handles.dir.clone();
-    let detected = use_memo(move || {
-        let _ = refresh();
-        let cfg = config();
-        let tool = tool_path(&cfg, &dir);
-        hardware::list_monitors(&tool).unwrap_or_default()
-    });
-
-    let monitors = detected();
+    // Scanned at launch (see `ui::scan_monitors`), so opening this view is instant.
+    let scan = (state.monitors)();
+    let monitors = match &scan {
+        Some(Ok(m)) => m.clone(),
+        _ => Vec::new(),
+    };
+    let status = match &scan {
+        None => Some("Scanning monitors…".to_string()),
+        Some(Err(e)) => Some(format!("Could not list monitors: {e}")),
+        Some(Ok(m)) if m.is_empty() => Some("No DDC/CI monitors found.".to_string()),
+        Some(Ok(_)) => None,
+    };
     let boxes = scale_layout(&monitors, 700.0, 280.0); // matches .layout in style.css
 
     rsx! {
@@ -96,14 +98,19 @@ pub fn Monitors() -> Element {
         }
 
         div { style: "display:flex; gap:8px; margin-bottom:12px;",
-            button { class: "secondary", onclick: move |_| refresh += 1, "Refresh" }
+            button { class: "secondary",
+                disabled: scan.is_none(),
+                onclick: {
+                    let dir = handles.dir.clone();
+                    move |_| scan_monitors(state.monitors, tool_path(&config(), &dir))
+                },
+                "Refresh"
+            }
         }
 
         div { class: "layout",
-            if monitors.is_empty() {
-                div { style: "padding:20px; color:var(--text-dim)",
-                    "No monitors detected. Check ControlMyMonitor.exe in Settings."
-                }
+            if let Some(status) = status {
+                div { style: "padding:20px; color:var(--text-dim)", "{status}" }
             }
             for (i, left, top, w, h) in boxes {
                 div {
