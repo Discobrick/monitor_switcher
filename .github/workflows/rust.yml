@@ -7,12 +7,14 @@ on:
       - '**.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'assets/**'
   pull_request:
     branches: [ "master" ]
     paths:
       - '**.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'assets/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,8 +46,10 @@ jobs:
         $tagName = "v$version-build.$env:GITHUB_RUN_NUMBER"
         echo "TAG_NAME=$tagName" >> $env:GITHUB_ENV
         
-        # Files are copied to target/release by build.rs
-        Compress-Archive -Path target/release/monitor_switcher.exe, target/release/config.toml, target/release/icon.ico -DestinationPath monitor_switcher.zip
+        # icon.ico is copied to target/release by build.rs
+        # No config.toml or ControlMyMonitor: the app writes a default config and
+        # downloads the tool on first launch.
+        Compress-Archive -Path target/release/monitor_switcher.exe, target/release/icon.ico -DestinationPath monitor_switcher.zip
 
     - name: Create Release
       if: github.event_name == 'push' && github.ref == 'refs/heads/master'
