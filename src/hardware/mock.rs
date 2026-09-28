@@ -100,6 +100,10 @@ pub fn read_input(_tool: &Path, monitor_id: &str) -> Result<u16, HardwareError> 
         .ok_or_else(|| HardwareError::UnknownMonitor(monitor_id.to_string()))
 }
 
+pub fn supported_inputs(_tool: &Path, _monitor_id: &str) -> Result<Vec<u16>, HardwareError> {
+    Ok(vec![15, 17, 18])
+}
+
 pub fn apply_input(_tool: &Path, monitor_id: &str, value: u16) -> Result<(), HardwareError> {
     let mut s = state().lock().expect("mock state poisoned");
 

@@ -241,6 +241,36 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
 
     let cooling_down = (state.cooldown)().is_some();
 
+    // Ask the monitor which inputs it has, once per session per monitor.
+    let mut cache = state.supported_inputs;
+    use_hook({
+        let dir = handles.dir.clone();
+        let id = monitor.monitor_id.clone();
+        move || {
+            if cache.peek().contains_key(&id) {
+                return;
+            }
+            let tool = tool_path(&config.peek(), &dir);
+            spawn(async move {
+                let inputs = off_thread({
+                    let id = id.clone();
+                    move || hardware::supported_inputs(&tool, &id).unwrap_or_default()
+                })
+                .await;
+                cache.write().insert(id, inputs);
+            });
+        }
+    });
+    let reported = cache().get(&monitor.monitor_id).cloned();
+    let loading = reported.is_none();
+    let unreported = reported.as_ref().is_some_and(Vec::is_empty);
+    let options: Vec<u16> = match reported {
+        Some(inputs) if !inputs.is_empty() => inputs,
+        _ => INPUT_PRESETS.iter().map(|(v, _)| *v).collect(),
+    };
+    // The select can only show a listed value, so test what it shows.
+    let target = if options.contains(&candidate()) { candidate() } else { options[0] };
+
     rsx! {
         div { class: "card",
             h2 { "{monitor.model}" }
@@ -252,6 +282,7 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
             div { style: "display:flex; gap:24px; flex-wrap:wrap; margin-top:12px;",
                 InputChooser {
                     label: "When the KVM is connected",
+                    options: options.clone(),
                     value: rule.on_connect,
                     on_change: {
                         let mut write_rule = write_rule.clone();
@@ -260,6 +291,7 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
                 }
                 InputChooser {
                     label: "When the KVM is disconnected",
+                    options: options.clone(),
                     value: rule.on_disconnect,
                     on_change: {
                         let mut write_rule = write_rule.clone();
@@ -296,26 +328,26 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
                  switches back on its own. You are asked what to do with it afterwards, so
                  you are never stranded on an input you cannot see."
             }
+            if loading {
+                p { style: "color:var(--text-dim);", "Reading this monitor's inputs… (common inputs listed meanwhile)" }
+            }
+            if unreported {
+                p { style: "color:var(--text-dim);",
+                    "This monitor didn't report its inputs, so the common ones are listed. Typical values:
+                     VGA = 1, DVI = 3, DisplayPort 1 = 15, DisplayPort 2 = 16, HDMI 1 = 17, HDMI 2 = 18."
+                }
+            }
 
             match phase() {
                 TestPhase::Idle => rsx! {
                     div { style: "display:flex; gap:10px; align-items:center;",
                         select {
-                            value: "{candidate}",
                             onchange: move |e| {
                                 if let Ok(v) = e.value().parse::<u16>() { candidate.set(v) }
                             },
-                            for (v, name) in INPUT_PRESETS {
-                                option { value: "{v}", "{name} ({v})" }
+                            for v in options.clone() {
+                                option { value: "{v}", selected: v == target, "{input_label(v)}" }
                             }
-                        }
-                        input {
-                            r#type: "number", min: "1", max: "255",
-                            style: "width:90px",
-                            value: "{candidate}",
-                            oninput: move |e| {
-                                if let Ok(v) = e.value().parse::<u16>() { candidate.set(v) }
-                            },
                         }
                         button {
                             class: "primary",
@@ -326,7 +358,7 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
                                 move |_| {
                                     let tool = tool_path(&config(), &dir);
                                     let id = id.clone();
-                                    let target = candidate();
+
                                     phase.set(TestPhase::Running { candidate: target, seconds_left: TEST_SECONDS });
                                     spawn(async move {
                                         let switched = {
@@ -412,30 +444,22 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
 }
 
 #[component]
-fn InputChooser(label: String, value: u16, on_change: EventHandler<u16>) -> Element {
+fn InputChooser(label: String, options: Vec<u16>, value: u16, on_change: EventHandler<u16>) -> Element {
     rsx! {
         div {
             div { style: "color:var(--text-dim); margin-bottom:6px;", "{label}" }
             select {
-                value: "{value}",
                 onchange: move |e| {
                     if let Ok(v) = e.value().parse::<u16>() { on_change.call(v) }
                 },
-                for (v, name) in INPUT_PRESETS {
-                    option { value: "{v}", selected: *v == value, "{name} ({v})" }
+                for v in options.iter().copied() {
+                    option { value: "{v}", selected: v == value, "{input_label(v)}" }
                 }
-                if !INPUT_PRESETS.iter().any(|(v, _)| *v == value) {
-                    option { value: "{value}", selected: true, "Custom ({value})" }
+                // A saved value the monitor didn't list stays visible rather
+                // than silently showing as the first option.
+                if !options.contains(&value) {
+                    option { value: "{value}", selected: true, "{input_label(value)} — not listed by monitor" }
                 }
-            }
-            input {
-                r#type: "number", min: "1", max: "255",
-                style: "width:90px; margin-left:8px;",
-                value: "{value}",
-                // onchange, not oninput: save once per edit, not per keystroke.
-                onchange: move |e| {
-                    if let Ok(v) = e.value().parse::<u16>() { on_change.call(v) }
-                },
             }
         }
     }

@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
 
 use super::parse::StextMonitor;
 use super::{
-    combine, input_from_exit_code, parse_dump, tool_error, HardwareError, MonitorGeometry, MonitorInfo,
+    combine, decode_dump, input_from_exit_code, parse::parse_possible_inputs, parse_dump, tool_error, HardwareError, MonitorGeometry, MonitorInfo,
     TempDump,
 };
 
@@ -35,6 +35,18 @@ pub fn list_monitors(tool: &Path) -> Result<Vec<MonitorInfo>, HardwareError> {
         m.current_input = read_input(tool, &m.monitor_id).ok();
     }
     Ok(combine(monitors, &enumerate_gdi()))
+}
+
+/// The input values the monitor reports supporting, from a full `/stext`
+/// dump. Slow (~6.5s: the tool reads every VCP code), so callers cache it.
+pub fn supported_inputs(tool: &Path, monitor_id: &str) -> Result<Vec<u16>, HardwareError> {
+    let dump = TempDump::new();
+    let args = [OsStr::new("/stext"), dump.path().as_os_str(), OsStr::new(monitor_id)];
+    let output = run(tool, &args)?;
+    if !output.status.success() {
+        return Err(tool_error(output.status.code(), &output.stderr));
+    }
+    Ok(parse_possible_inputs(&decode_dump(&std::fs::read(dump.path())?)))
 }
 
 /// Reads VCP 60 via `/GetValue`, which reports the value as its exit code.

@@ -92,9 +92,54 @@ pub fn parse_smonitors(text: &str) -> Vec<StextMonitor> {
     out
 }
 
+/// Pulls the input-select (VCP 60) "Possible Values" out of a `/stext` dump.
+///
+/// These come from the monitor's DDC capabilities string, so they are the
+/// inputs it actually has. Empty when the monitor doesn't report any.
+pub fn parse_possible_inputs(text: &str) -> Vec<u16> {
+    let mut in_vcp60 = false;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else { continue };
+        match key.trim() {
+            "VCP Code" => in_vcp60 = value.trim() == "60",
+            "Possible Values" if in_vcp60 => {
+                return value.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Excerpt of a real `/stext` dump (Philips 273V7: VGA, DVI, HDMI).
+    const STEXT: &str = "\
+==================================================
+VCP Code          : 10
+VCP Code Name     : Brightness
+Current Value     : 65
+Possible Values   :
+==================================================
+VCP Code          : 60
+VCP Code Name     : Input Select
+Read-Write        : Read+Write
+Current Value     : 17
+Maximum Value     : 17
+Possible Values   : 1, 3, 17
+==================================================
+VCP Code          : 62
+Possible Values   : 5, 6
+";
+
+    #[test]
+    fn possible_inputs_come_from_the_vcp60_block_only() {
+        assert_eq!(parse_possible_inputs(STEXT), [1, 3, 17]);
+        assert!(parse_possible_inputs("VCP Code : 60\nPossible Values : \n").is_empty());
+        assert!(parse_possible_inputs("").is_empty());
+    }
 
     #[test]
     fn parses_vid_pid_pairs() {

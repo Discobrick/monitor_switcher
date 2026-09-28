@@ -12,13 +12,14 @@ mod usb;
 mod mock;
 
 #[cfg(windows)]
-pub use mon::{apply_input, list_monitors, read_input};
+pub use mon::{apply_input, list_monitors, read_input, supported_inputs};
 #[cfg(windows)]
 pub use usb::list_devices;
 
 #[cfg(not(windows))]
 pub use mock::{
     apply_input, list_devices, list_monitors, read_input, set_all_present, set_device_present,
+    supported_inputs,
     set_fail_next_command, set_tool_present,
 };
 

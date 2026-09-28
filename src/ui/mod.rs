@@ -6,6 +6,7 @@ mod settings;
 #[cfg(not(windows))]
 mod debug;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,10 @@ pub struct AppState {
     pub devices_rev: Signal<u32>,
     /// Last monitor scan; `None` while one is running. See `scan_monitors`.
     pub monitors: Signal<Option<Result<Vec<MonitorInfo>, String>>>,
+    /// Inputs each monitor reports supporting, by monitor id. Read lazily
+    /// (it's ~6.5s per monitor) and kept for the session; an empty list means
+    /// the read failed or the monitor reported none.
+    pub supported_inputs: Signal<HashMap<String, Vec<u16>>>,
 }
 
 /// Enumerates monitors off the UI thread (the DDC reads take a few hundred ms)
@@ -128,6 +133,7 @@ fn Root() -> Element {
         tool_ok: use_signal(|| true),
         devices_rev: use_signal(|| 0),
         monitors: use_signal(|| None),
+        supported_inputs: use_signal(HashMap::new),
     };
     use_context_provider(|| state);
     use_context_provider(|| props.handles.clone());
