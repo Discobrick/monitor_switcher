@@ -1,4 +1,11 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use dioxus::prelude::*;
+use futures_channel::mpsc::UnboundedReceiver;
+use futures_util::StreamExt;
 
 use crate::app::tool_path;
 use crate::config::MonitorRule;
@@ -190,13 +197,52 @@ pub fn Monitors() -> Element {
 enum TestPhase {
     Idle,
     /// Showing the candidate, counting down before the automatic revert.
-    Running { candidate: u16, seconds_left: u8 },
+    Running { candidate: u16, seconds_left: u32 },
     /// Reverted; waiting for the user to say what to do with the candidate.
     Asking { candidate: u16 },
     Failed { message: String },
 }
 
-const TEST_SECONDS: u8 = 8;
+/// Long enough for the monitor to resync and a sleeping PC on the other
+/// input to wake; "+10 s" and "Switch back now" adjust it mid-test.
+const TEST_SECONDS: u32 = 15;
+const EXTEND_SECONDS: u32 = 10;
+
+enum TestMsg {
+    Tick(u32),
+    Done(Result<(), String>),
+}
+
+/// Runs a whole input test on its own thread: switch, count `left` down to
+/// zero, switch back. The switch-back lives here, not in the UI, so closing
+/// the panel mid-test can't strand the monitor on the test input.
+fn run_test(tool: PathBuf, id: String, target: u16, left: Arc<AtomicU32>) -> UnboundedReceiver<TestMsg> {
+    let (tx, rx) = futures_channel::mpsc::unbounded();
+    std::thread::spawn(move || {
+        let switched = hardware::read_input(&tool, &id)
+            .and_then(|previous| hardware::apply_input(&tool, &id, target).map(|()| previous));
+        let previous = match switched {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = tx.unbounded_send(TestMsg::Done(Err(e.to_string())));
+                return;
+            }
+        };
+        loop {
+            let l = left.load(Ordering::Relaxed);
+            let _ = tx.unbounded_send(TestMsg::Tick(l));
+            if l == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = left.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
+        }
+        let back = hardware::apply_input(&tool, &id, previous)
+            .map_err(|e| format!("could not switch back: {e}"));
+        let _ = tx.unbounded_send(TestMsg::Done(back));
+    });
+    rx
+}
 
 /// Input rules for one monitor, plus a test that reverts *before* asking,
 /// since mid-test this window may be on an input the user can't see.
@@ -208,6 +254,8 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
     let mut config = state.config;
     let mut phase = use_signal(|| TestPhase::Idle);
     let mut candidate = use_signal(|| 15u16);
+    // Seconds until switch-back, shared with the test thread.
+    let left = use_hook(|| Arc::new(AtomicU32::new(0)));
 
     let cfg = config();
     let saved = cfg.monitors.iter().find(|r| r.monitor_id == monitor.monitor_id).cloned();
@@ -355,39 +403,18 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
                             onclick: {
                                 let dir = handles.dir.clone();
                                 let id = monitor.monitor_id.clone();
+                                let left = left.clone();
                                 move |_| {
-                                    let tool = tool_path(&config(), &dir);
-                                    let id = id.clone();
-
+                                    left.store(TEST_SECONDS, Ordering::Relaxed);
                                     phase.set(TestPhase::Running { candidate: target, seconds_left: TEST_SECONDS });
+                                    let mut rx = run_test(tool_path(&config(), &dir), id.clone(), target, left.clone());
                                     spawn(async move {
-                                        let switched = {
-                                            let (tool, id) = (tool.clone(), id.clone());
-                                            off_thread(move || {
-                                                let previous = hardware::read_input(&tool, &id)?;
-                                                hardware::apply_input(&tool, &id, target)?;
-                                                Ok::<_, hardware::HardwareError>(previous)
-                                            })
-                                            .await
-                                        };
-                                        let previous = match switched {
-                                            Ok(p) => p,
-                                            Err(e) => {
-                                                phase.set(TestPhase::Failed { message: e.to_string() });
-                                                return;
-                                            }
-                                        };
-
-                                        // Count down, then revert unconditionally.
-                                        for seconds_left in (0..TEST_SECONDS).rev() {
-                                            off_thread(|| std::thread::sleep(std::time::Duration::from_secs(1))).await;
-                                            phase.set(TestPhase::Running { candidate: target, seconds_left });
-                                        }
-                                        match off_thread(move || hardware::apply_input(&tool, &id, previous)).await {
-                                            Ok(()) => phase.set(TestPhase::Asking { candidate: target }),
-                                            Err(e) => phase.set(TestPhase::Failed {
-                                                message: format!("could not switch back: {e}"),
-                                            }),
+                                        while let Some(msg) = rx.next().await {
+                                            phase.set(match msg {
+                                                TestMsg::Tick(seconds_left) => TestPhase::Running { candidate: target, seconds_left },
+                                                TestMsg::Done(Ok(())) => TestPhase::Asking { candidate: target },
+                                                TestMsg::Done(Err(message)) => TestPhase::Failed { message },
+                                            });
                                         }
                                     });
                                 }
@@ -405,6 +432,22 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
                 TestPhase::Running { candidate, seconds_left } => rsx! {
                     div { class: "banner warn",
                         "Showing {input_label(candidate)} — switching back in {seconds_left}s."
+                    }
+                    div { style: "display:flex; gap:8px;",
+                        button { class: "secondary",
+                            onclick: {
+                                let left = left.clone();
+                                move |_| { left.fetch_add(EXTEND_SECONDS, Ordering::Relaxed); }
+                            },
+                            "+{EXTEND_SECONDS} s"
+                        }
+                        button { class: "secondary",
+                            onclick: {
+                                let left = left.clone();
+                                move |_| left.store(0, Ordering::Relaxed)
+                            },
+                            "Switch back now"
+                        }
                     }
                 },
 
