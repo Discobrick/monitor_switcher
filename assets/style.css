@@ -121,7 +121,7 @@ input.rename:hover, input.rename:focus { background: var(--bg); border-color: va
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  height: 280px;
+  width: 700px; height: 280px;
   margin-bottom: 16px;
 }
 .screen {
