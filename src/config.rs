@@ -50,6 +50,10 @@ pub struct Config {
     pub monitoring_enabled: bool,
     /// Empty means "look next to the executable".
     pub control_my_monitor_path: String,
+    /// Set once ControlMyMonitor is in place after first launch, so a missing
+    /// tool is fetched automatically only until then. See `ui::first_launch`.
+    #[serde(default)]
+    pub setup_done: bool,
     #[serde(default)]
     pub devices: Vec<DeviceEntry>,
     #[serde(default)]
@@ -73,6 +77,7 @@ impl Default for Config {
             test_secs: default_test_secs(),
             monitoring_enabled: true,
             control_my_monitor_path: String::new(),
+            setup_done: false,
             devices: Vec::new(),
             monitors: Vec::new(),
             labels: Default::default(),

@@ -13,9 +13,13 @@ mod imp {
     use std::path::PathBuf;
 
     use super::StartupError;
-    use crate::deps::ps_quote;
 
     const LINK_NAME: &str = "Monitor Switcher.lnk";
+
+    /// Quotes `s` as a PowerShell single-quoted string literal.
+    pub(super) fn ps_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
 
     fn startup_dir() -> Result<PathBuf, StartupError> {
         let appdata = std::env::var("APPDATA")
@@ -84,3 +88,11 @@ mod imp {
 }
 
 pub use imp::{is_enabled, set_enabled};
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn ps_quote_escapes_embedded_single_quotes() {
+        assert_eq!(super::imp::ps_quote(r"C:\Users\O'Brien\x.exe"), r"'C:\Users\O''Brien\x.exe'");
+    }
+}

@@ -128,7 +128,7 @@ use crate::hardware;
 
 /// Current time of day, UTC, formatted `HH:MM:SS`. No timezone conversion —
 /// this is a display timestamp, not a wall-clock claim.
-fn now_string() -> String {
+pub fn now_string() -> String {
     // ponytail: no chrono dependency for one timestamp. SystemTime -> HH:MM:SS
     // via seconds-of-day arithmetic; the date is never displayed.
     let secs = std::time::SystemTime::now()

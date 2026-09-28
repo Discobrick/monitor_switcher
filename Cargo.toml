@@ -10,6 +10,8 @@ thiserror = "2.0"
 dioxus = { version = "0.7.10", features = ["desktop"] }
 futures-channel = "0.3"
 futures-util = "0.3"
+ureq = "3.4.2"
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.52", features = [

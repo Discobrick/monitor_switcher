@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use dioxus::prelude::*;
 
-use crate::app::{tool_path, Command, Event, LogEntry};
+use crate::app::{tool_path, Command, Event, LogEntry, Severity};
+use crate::{deps, watcher};
 use crate::config::Config;
 use crate::hardware::{self, MonitorInfo};
 
@@ -55,6 +56,53 @@ pub fn scan_monitors(mut target: Signal<Option<Result<Vec<MonitorInfo>, String>>
         let result = off_thread(move || hardware::list_monitors(&tool).map_err(|e| e.to_string())).await;
         target.set(Some(result));
     });
+}
+
+/// First launch: fetch ControlMyMonitor if it's missing, then set
+/// `setup_done` so it's never fetched unasked again. A failed download (say,
+/// offline) leaves the flag unset and retries next launch; Settings can
+/// always download it by hand.
+fn first_launch(mut state: AppState, handles: Handles) {
+    let dir = handles.dir.clone();
+    let done = move |state: &mut AppState| {
+        state.config.write().setup_done = true;
+        handles.save(&state.config.peek());
+    };
+    if state.config.peek().setup_done {
+        return;
+    }
+    if deps::is_present(&tool_path(&state.config.peek(), &dir)) {
+        done(&mut state);
+        return;
+    }
+
+    spawn(async move {
+        log(state, Severity::Info, "First launch: downloading ControlMyMonitor from nirsoft.net…");
+        match off_thread({
+            let dir = dir.clone();
+            move || deps::download_to(&dir)
+        })
+        .await
+        {
+            Ok(()) => {
+                // It landed next to the app, so use that copy.
+                state.config.write().control_my_monitor_path.clear();
+                done(&mut state);
+                state.tool_ok.set(true);
+                log(state, Severity::Success, "ControlMyMonitor installed.");
+                scan_monitors(state.monitors, dir.join(deps::EXE_NAME));
+            }
+            Err(e) => log(
+                state,
+                Severity::Error,
+                &format!("Could not download ControlMyMonitor ({e}). Will retry next launch, or use Settings."),
+            ),
+        }
+    });
+}
+
+fn log(mut state: AppState, severity: Severity, message: &str) {
+    state.log.write().push(LogEntry { at: watcher::now_string(), severity, message: message.into() });
 }
 
 /// Runs blocking work (a ControlMyMonitor call, a sleep) on its own thread so
@@ -130,7 +178,7 @@ fn Root() -> Element {
         log: use_signal(Vec::new),
         present: use_signal(|| false),
         cooldown: use_signal(|| None),
-        tool_ok: use_signal(|| crate::deps::is_present(&tool_path(&props.initial, &props.handles.dir))),
+        tool_ok: use_signal(|| deps::is_present(&tool_path(&props.initial, &props.handles.dir))),
         devices_rev: use_signal(|| 0),
         monitors: use_signal(|| None),
         supported_inputs: use_signal(HashMap::new),
@@ -138,6 +186,7 @@ fn Root() -> Element {
     use_context_provider(|| state);
     use_context_provider(|| props.handles.clone());
     use_hook(|| scan_monitors(state.monitors, tool_path(&props.initial, &props.handles.dir)));
+    use_hook(|| first_launch(state, props.handles.clone()));
 
     let tab = use_signal(|| Tab::Dashboard);
 
