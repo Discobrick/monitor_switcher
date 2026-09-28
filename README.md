@@ -7,6 +7,8 @@ DDC/CI.
 
 ## Setup
 
+For a step-by-step walkthrough with screenshots, see **[docs/SETUP.md](docs/SETUP.md)**.
+
 1. Run `monitor_switcher.exe`. On first launch it downloads `ControlMyMonitor.exe` from
    NirSoft into the same folder (progress shows under **Dashboard → Activity**). If that
    fails, for example offline, it retries next launch, or use **Settings** to download it or
