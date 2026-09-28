@@ -44,6 +44,9 @@ pub struct MonitorRule {
 pub struct Config {
     pub version: u32,
     pub cooldown_secs: u64,
+    /// How long an input test shows the candidate before switching back.
+    #[serde(default = "default_test_secs")]
+    pub test_secs: u32,
     pub monitoring_enabled: bool,
     /// Empty means "look next to the executable".
     pub control_my_monitor_path: String,
@@ -56,11 +59,18 @@ pub struct Config {
     pub labels: std::collections::BTreeMap<String, String>,
 }
 
+/// Long enough for a monitor to resync and a sleeping PC on the other input
+/// to wake.
+fn default_test_secs() -> u32 {
+    15
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             version: CURRENT_VERSION,
             cooldown_secs: 60,
+            test_secs: default_test_secs(),
             monitoring_enabled: true,
             control_my_monitor_path: String::new(),
             devices: Vec::new(),
@@ -147,6 +157,17 @@ mod tests {
         let c = Config::load(dir.path()).unwrap();
         assert!(c.devices.is_empty());
         assert_eq!(std::fs::read_to_string(dir.path().join("config.toml.broken")).unwrap(), v1);
+    }
+
+    /// Configs written before `test_secs` existed must load, not be quarantined.
+    #[test]
+    fn a_config_without_test_secs_loads_with_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = "version = 2\ncooldown_secs = 60\nmonitoring_enabled = true\ncontrol_my_monitor_path = \"\"\n";
+        std::fs::write(dir.path().join("config.toml"), old).unwrap();
+
+        assert_eq!(Config::load(dir.path()).unwrap().test_secs, 15);
+        assert!(!dir.path().join("config.toml.broken").exists());
     }
 
     #[test]

@@ -203,9 +203,7 @@ enum TestPhase {
     Failed { message: String },
 }
 
-/// Long enough for the monitor to resync and a sleeping PC on the other
-/// input to wake; "+10 s" and "Switch back now" adjust it mid-test.
-const TEST_SECONDS: u32 = 15;
+/// "+10 s" mid-test; the base duration is `Config::test_secs`.
 const EXTEND_SECONDS: u32 = 10;
 
 enum TestMsg {
@@ -372,7 +370,7 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
         div { class: "card",
             h2 { "Test an input" }
             p { style: "color:var(--text-dim); margin-top:-4px;",
-                "The monitor switches to the chosen input for {TEST_SECONDS} seconds, then
+                "The monitor switches to the chosen input for {cfg.test_secs} seconds (change it in Settings), then
                  switches back on its own. You are asked what to do with it afterwards, so
                  you are never stranded on an input you cannot see."
             }
@@ -405,8 +403,9 @@ fn MonitorPanel(monitor: MonitorInfo) -> Element {
                                 let id = monitor.monitor_id.clone();
                                 let left = left.clone();
                                 move |_| {
-                                    left.store(TEST_SECONDS, Ordering::Relaxed);
-                                    phase.set(TestPhase::Running { candidate: target, seconds_left: TEST_SECONDS });
+                                    let secs = config().test_secs;
+                                    left.store(secs, Ordering::Relaxed);
+                                    phase.set(TestPhase::Running { candidate: target, seconds_left: secs });
                                     let mut rx = run_test(tool_path(&config(), &dir), id.clone(), target, left.clone());
                                     spawn(async move {
                                         while let Some(msg) = rx.next().await {
