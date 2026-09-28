@@ -32,20 +32,20 @@ pub fn list_monitors(tool: &Path) -> Result<Vec<MonitorInfo>, HardwareError> {
     let mut monitors = dump_smonitors(tool)?;
     for m in &mut monitors {
         // One ~150ms DDC read each; a monitor that won't answer just shows "?".
-        m.current_input = read_input(tool, &m.serial).ok();
+        m.current_input = read_input(tool, &m.monitor_id).ok();
     }
     Ok(combine(monitors, &enumerate_gdi()))
 }
 
 /// Reads VCP 60 via `/GetValue`, which reports the value as its exit code.
-pub fn read_input(tool: &Path, serial: &str) -> Result<u16, HardwareError> {
-    let args = ["/GetValue", serial, VCP_INPUT_SELECT].map(OsStr::new);
+pub fn read_input(tool: &Path, monitor_id: &str) -> Result<u16, HardwareError> {
+    let args = ["/GetValue", monitor_id, VCP_INPUT_SELECT].map(OsStr::new);
     let output = run(tool, &args)?;
     output
         .status
         .code()
         .and_then(input_from_exit_code)
-        .ok_or_else(|| HardwareError::UnknownSerial(serial.to_string()))
+        .ok_or_else(|| HardwareError::UnknownMonitor(monitor_id.to_string()))
 }
 
 /// Sets VCP 60 on the monitor with the given key (its PnP Monitor ID).
@@ -53,10 +53,10 @@ pub fn read_input(tool: &Path, serial: &str) -> Result<u16, HardwareError> {
 /// ControlMyMonitor accepts the Monitor ID directly as its monitor argument,
 /// so no display-index lookup is needed at switch time — which matters, because
 /// display indices shuffle on replug and reboot while Monitor IDs do not.
-/// (It does not accept serial numbers, despite what the field is called.)
-pub fn apply_input(tool: &Path, serial: &str, value: u16) -> Result<(), HardwareError> {
+/// (It does not accept serial numbers, and some monitors report none.)
+pub fn apply_input(tool: &Path, monitor_id: &str, value: u16) -> Result<(), HardwareError> {
     let value = value.to_string();
-    let args = ["/SetValue", serial, VCP_INPUT_SELECT, &value].map(OsStr::new);
+    let args = ["/SetValue", monitor_id, VCP_INPUT_SELECT, &value].map(OsStr::new);
     let output = run(tool, &args)?;
 
     if output.status.success() {

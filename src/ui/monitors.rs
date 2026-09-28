@@ -107,7 +107,7 @@ pub fn Monitors() -> Element {
             }
             for (i, left, top, w, h) in boxes {
                 div {
-                    key: "{monitors[i].serial}",
+                    key: "{monitors[i].monitor_id}",
                     class: if selected() == i { "screen selected" } else { "screen" },
                     style: "left:{left}px; top:{top}px; width:{w}px; height:{h}px;",
                     onclick: move |_| selected.set(i),
@@ -129,7 +129,7 @@ pub fn Monitors() -> Element {
             let unmatched: Vec<MonitorRule> = cfg
                 .monitors
                 .iter()
-                .filter(|r| r.serial.is_empty() || !monitors.iter().any(|m| m.serial == r.serial))
+                .filter(|r| r.monitor_id.is_empty() || !monitors.iter().any(|m| m.monitor_id == r.monitor_id))
                 .cloned()
                 .collect();
 
@@ -156,7 +156,7 @@ pub fn Monitors() -> Element {
                                                     move |_| {
                                                         let mut c = config();
                                                         c.monitors.retain(|x| {
-                                                            !(x.serial == r.serial && x.label == r.label)
+                                                            !(x.monitor_id == r.monitor_id && x.label == r.label)
                                                         });
                                                         handles.save(&c);
                                                         config.set(c);
@@ -190,7 +190,7 @@ mod tests {
 
     fn m(x: i32, y: i32, w: i32, h: i32) -> MonitorInfo {
         MonitorInfo {
-            serial: format!("S{x}"),
+            monitor_id: format!("S{x}"),
             model: "Test".into(),
             device_name: "dev".into(),
             x, y, width: w, height: h,

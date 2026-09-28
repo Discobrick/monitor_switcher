@@ -105,7 +105,7 @@ pub fn merge(out: &mut Vec<(UsbDevice, NameSource)>, device: UsbDevice, source: 
 /// A monitor, merging GDI geometry with ControlMyMonitor identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorInfo {
-    pub serial: String,
+    pub monitor_id: String,
     pub model: String,
     /// `\\.\DISPLAY1\Monitor0`, resolved fresh each enumeration.
     pub device_name: String,
@@ -164,7 +164,7 @@ pub fn combine(stext: Vec<parse::StextMonitor>, gdi: &[MonitorGeometry]) -> Vec<
                 .find(|g| g.device.eq_ignore_ascii_case(display_prefix(&s.device_name)));
 
             MonitorInfo {
-                serial: s.serial,
+                monitor_id: s.monitor_id,
                 model: s.model,
                 device_name: s.device_name,
                 x: g.map_or(0, |g| g.x),
@@ -297,8 +297,8 @@ pub enum HardwareError {
     ToolMissing(String),
     #[error("ControlMyMonitor.exe failed: {0}")]
     ToolFailed(String),
-    #[error("no monitor with serial {0}")]
-    UnknownSerial(String),
+    #[error("no monitor with id {0}")]
+    UnknownMonitor(String),
     /// A Win32 API call failed. Carries its own full message, since no tool is
     /// involved and the ControlMyMonitor wording would be misleading.
     #[error("{0}")]
@@ -402,11 +402,11 @@ mod tests {
 
     // -- monitor correlation ------------------------------------------------
 
-    fn stext(device_name: &str, serial: &str, input: Option<u16>) -> parse::StextMonitor {
+    fn stext(device_name: &str, monitor_id: &str, input: Option<u16>) -> parse::StextMonitor {
         parse::StextMonitor {
             device_name: device_name.into(),
             model: "DELL U2720Q".into(),
-            serial: serial.into(),
+            monitor_id: monitor_id.into(),
             current_input: input,
         }
     }
@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].x, out[0].y, out[0].width, out[0].height), (3840, -400, 1080, 1920));
         assert!(!out[0].is_primary);
-        assert_eq!(out[0].serial, "XYZ987654");
+        assert_eq!(out[0].monitor_id, "XYZ987654");
         assert_eq!(out[0].current_input, Some(17));
     }
 
@@ -492,8 +492,8 @@ mod tests {
             &[geom(r"\\.\DISPLAY3", -1920, 300, 1920, 1080, false)],
         );
 
-        let serials: Vec<&str> = out.iter().map(|m| m.serial.as_str()).collect();
-        assert_eq!(serials, ["AAA", "BBB", "CCC"]);
+        let ids: Vec<&str> = out.iter().map(|m| m.monitor_id.as_str()).collect();
+        assert_eq!(ids, ["AAA", "BBB", "CCC"]);
         assert_eq!(out[2].x, -1920);
     }
 
@@ -548,7 +548,7 @@ mod tests {
 
         let parsed = parse::parse_smonitors(&decode_dump(&bytes));
         assert_eq!(parsed.len(), 1, "the decoded UTF-16 dump must parse");
-        assert_eq!(parsed[0].serial, r"MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007");
+        assert_eq!(parsed[0].monitor_id, r"MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007");
     }
 
     // -- tool exit status ---------------------------------------------------

@@ -45,7 +45,7 @@ impl MockState {
         // third screen, so the layout maths is genuinely exercised.
         let monitors = vec![
             MonitorInfo {
-                serial: "ABC123456".into(),
+                monitor_id: "ABC123456".into(),
                 model: "DELL U2720Q".into(),
                 device_name: r"\\.\DISPLAY1\Monitor0".into(),
                 x: 0, y: 0, width: 3840, height: 2160,
@@ -53,7 +53,7 @@ impl MockState {
                 current_input: Some(15),
             },
             MonitorInfo {
-                serial: "XYZ987654".into(),
+                monitor_id: "XYZ987654".into(),
                 model: "LG HDR 4K".into(),
                 device_name: r"\\.\DISPLAY2\Monitor0".into(),
                 x: 3840, y: -400, width: 1080, height: 1920,
@@ -61,7 +61,7 @@ impl MockState {
                 current_input: Some(17),
             },
             MonitorInfo {
-                serial: "QWE555111".into(),
+                monitor_id: "QWE555111".into(),
                 model: "AOC 24G2".into(),
                 device_name: r"\\.\DISPLAY3\Monitor0".into(),
                 x: -1920, y: 300, width: 1920, height: 1080,
@@ -91,16 +91,16 @@ pub fn list_monitors(_tool: &Path) -> Result<Vec<MonitorInfo>, HardwareError> {
     Ok(s.monitors.clone())
 }
 
-pub fn read_input(_tool: &Path, serial: &str) -> Result<u16, HardwareError> {
+pub fn read_input(_tool: &Path, monitor_id: &str) -> Result<u16, HardwareError> {
     let s = state().lock().expect("mock state poisoned");
     s.monitors
         .iter()
-        .find(|m| m.serial == serial)
+        .find(|m| m.monitor_id == monitor_id)
         .and_then(|m| m.current_input)
-        .ok_or_else(|| HardwareError::UnknownSerial(serial.to_string()))
+        .ok_or_else(|| HardwareError::UnknownMonitor(monitor_id.to_string()))
 }
 
-pub fn apply_input(_tool: &Path, serial: &str, value: u16) -> Result<(), HardwareError> {
+pub fn apply_input(_tool: &Path, monitor_id: &str, value: u16) -> Result<(), HardwareError> {
     let mut s = state().lock().expect("mock state poisoned");
 
     if s.fail_next {
@@ -116,8 +116,8 @@ pub fn apply_input(_tool: &Path, serial: &str, value: u16) -> Result<(), Hardwar
     let m = s
         .monitors
         .iter_mut()
-        .find(|m| m.serial == serial)
-        .ok_or_else(|| HardwareError::UnknownSerial(serial.to_string()))?;
+        .find(|m| m.monitor_id == monitor_id)
+        .ok_or_else(|| HardwareError::UnknownMonitor(monitor_id.to_string()))?;
     m.current_input = Some(value);
     Ok(())
 }

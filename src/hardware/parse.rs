@@ -4,9 +4,9 @@ pub struct StextMonitor {
     /// e.g. `\\.\DISPLAY1\Monitor0` — used only to correlate with GDI output.
     pub device_name: String,
     pub model: String,
-    /// Despite the name, the PnP Monitor ID (`MONITOR\DELA28A\{...}\0001`):
-    /// the stable key ControlMyMonitor accepts. See `parse_smonitors`.
-    pub serial: String,
+    /// PnP Monitor ID (`MONITOR\DELA28A\{...}\0001`): the stable key
+    /// ControlMyMonitor accepts. See `parse_smonitors`.
+    pub monitor_id: String,
     /// Current VCP 60 value, read separately via `/GetValue`.
     pub current_input: Option<u16>,
 }
@@ -46,7 +46,7 @@ pub fn extract_id_from_instance(instance_id: &str) -> Option<String> {
 /// Parses a ControlMyMonitor `/smonitors` dump: one blank-line-separated
 /// block per monitor, values in double quotes.
 ///
-/// The stable key stored in `serial` is the PnP `Monitor ID`, because
+/// The stable key stored in `monitor_id` is the PnP `Monitor ID`, because
 /// ControlMyMonitor does not accept serial numbers as a monitor argument and
 /// many monitors report none. `current_input` is left empty; the dump carries
 /// no VCP values, so the caller reads them with `/GetValue`.
@@ -65,7 +65,7 @@ pub fn parse_smonitors(text: &str) -> Vec<StextMonitor> {
             "Monitor Device Name" => out.push(StextMonitor {
                 device_name: value,
                 model: String::new(),
-                serial: String::new(),
+                monitor_id: String::new(),
                 current_input: None,
             }),
             "Monitor Name" => {
@@ -80,7 +80,7 @@ pub fn parse_smonitors(text: &str) -> Vec<StextMonitor> {
                     if m.model.is_empty() {
                         m.model = value.split('\\').nth(1).unwrap_or_default().to_string();
                     }
-                    m.serial = value;
+                    m.monitor_id = value;
                 }
             }
             _ => {}
@@ -88,7 +88,7 @@ pub fn parse_smonitors(text: &str) -> Vec<StextMonitor> {
     }
 
     // A block without a Monitor ID cannot be addressed, so it is not a monitor.
-    out.retain(|m| !m.serial.is_empty());
+    out.retain(|m| !m.monitor_id.is_empty());
     out
 }
 
@@ -148,10 +148,10 @@ Monitor ID: "MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007"
         let monitors = parse_smonitors(SAMPLE);
         assert_eq!(monitors.len(), 2);
         assert_eq!(monitors[0].device_name, r"\\.\DISPLAY1\Monitor0");
-        assert_eq!(monitors[0].serial, r"MONITOR\DELA28A\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001");
+        assert_eq!(monitors[0].monitor_id, r"MONITOR\DELA28A\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001");
         assert_eq!(monitors[0].model, "DELA28A", "a blank name falls back to the EDID code");
         assert_eq!(monitors[1].model, "PHL 273V7");
-        assert_eq!(monitors[1].serial, r"MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007");
+        assert_eq!(monitors[1].monitor_id, r"MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007");
         assert!(monitors.iter().all(|m| m.current_input.is_none()));
     }
 

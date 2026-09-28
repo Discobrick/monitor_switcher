@@ -114,7 +114,7 @@ pub fn Debug() -> Element {
                     onclick: move |_| {
                         let mut c = (state.config)();
                         c.monitors.push(crate::config::MonitorRule {
-                            serial: String::new(),
+                            monitor_id: String::new(),
                             label: "Unmatched monitor".into(),
                             on_connect: 15,
                             on_disconnect: 17,

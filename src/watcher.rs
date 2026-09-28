@@ -152,17 +152,17 @@ fn apply_all(cfg: &Config, dir: &Path, present: bool, tx: &Sender<Event>) {
     let tool = crate::app::tool_path(cfg, dir);
 
     for rule in &cfg.monitors {
-        if rule.serial.is_empty() {
+        if rule.monitor_id.is_empty() {
             log(
                 tx,
                 Severity::Warning,
-                format!("Skipping \"{}\": no serial, re-detect it in Monitors", rule.label),
+                format!("Skipping \"{}\": not matched to a monitor, pick it again in Monitors", rule.label),
             );
             continue;
         }
 
         let value = if present { rule.on_connect } else { rule.on_disconnect };
-        match hardware::apply_input(&tool, &rule.serial, value) {
+        match hardware::apply_input(&tool, &rule.monitor_id, value) {
             Ok(()) => log(tx, Severity::Success, format!("{} -> input {}", rule.label, value)),
             Err(e) => log(tx, Severity::Error, format!("{} failed: {e}", rule.label)),
         }
@@ -698,8 +698,8 @@ mod run_tests {
     use std::sync::mpsc::channel;
     use std::time::Duration;
 
-    fn rule(serial: &str) -> MonitorRule {
-        MonitorRule { serial: serial.into(), label: "Test monitor".into(), on_connect: 15, on_disconnect: 17 }
+    fn rule(monitor_id: &str) -> MonitorRule {
+        MonitorRule { monitor_id: monitor_id.into(), label: "Test monitor".into(), on_connect: 15, on_disconnect: 17 }
     }
 
     #[test]
@@ -707,7 +707,7 @@ mod run_tests {
         let (tx, rx) = channel();
         let mut cfg = Config::default();
         cfg.monitors.push(MonitorRule {
-            serial: String::new(),
+            monitor_id: String::new(),
             label: "Unresolved monitor".into(),
             on_connect: 15,
             on_disconnect: 17,

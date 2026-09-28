@@ -7,9 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = app::app_dir()?;
     std::env::set_current_dir(&dir)?;
 
-    // `load_config` (not the bare `Config::load`) upgrades a pre-versioning
-    // config on the way in; see Task 8.
-    let cfg = app::load_config(&dir)?;
+    let cfg = monitor_switcher::config::Config::load(&dir)?;
     let shared = Arc::new(Mutex::new(cfg.clone()));
 
     let (event_tx, event_rx) = channel();
