@@ -229,6 +229,9 @@ pub fn run(
         if woken {
             std::thread::sleep(Duration::from_millis(500));
             while wake.try_recv().is_ok() {}
+            // Sent even while monitoring is paused: the Devices view still
+            // needs a live list.
+            let _ = tx.send(Event::DevicesChanged);
         }
 
         let now = Instant::now();

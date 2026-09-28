@@ -101,6 +101,8 @@ pub enum Event {
     /// Cooldown seconds remaining, or None when idle.
     Cooldown(Option<u64>),
     Log(LogEntry),
+    /// Some USB device came or went; views listing devices should re-enumerate.
+    DevicesChanged,
 }
 
 /// UI -> watcher thread.

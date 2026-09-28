@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::config::DeviceEntry;
-use crate::hardware::{self, DeviceClass};
+use crate::config::{Config, DeviceEntry};
+use crate::hardware::{self, DeviceClass, UsbDevice};
 use crate::ui::{AppState, Handles};
 
 fn icon(class: DeviceClass) -> &'static str {
@@ -14,25 +14,86 @@ fn icon(class: DeviceClass) -> &'static str {
     }
 }
 
+/// Devices present in exactly one of the two lists — what came or went.
+fn changed(before: &[UsbDevice], after: &[UsbDevice]) -> Vec<UsbDevice> {
+    let missing_from = |list: &[UsbDevice], d: &UsbDevice| !list.iter().any(|x| x.id == d.id);
+    before
+        .iter()
+        .filter(|d| missing_from(after, d))
+        .chain(after.iter().filter(|d| missing_from(before, d)))
+        .cloned()
+        .collect()
+}
+
+fn set_watched(mut config: Signal<Config>, handles: &Handles, d: &UsbDevice, on: bool) {
+    let mut c = config();
+    if on {
+        if !c.watches(&d.id) {
+            c.devices.push(DeviceEntry {
+                id: d.id.clone(),
+                name: d.name.clone(),
+                class: d.class.as_str().to_string(),
+            });
+        }
+    } else {
+        c.devices.retain(|x| x.id != d.id);
+    }
+    handles.save(&c);
+    config.set(c);
+}
+
+/// Renames a watched device; a blank label falls back to the hardware name.
+fn rename(mut config: Signal<Config>, handles: &Handles, d: &UsbDevice, label: &str) {
+    let mut c = config();
+    let Some(entry) = c.devices.iter_mut().find(|x| x.id == d.id) else { return };
+    let label = label.trim();
+    entry.name = if label.is_empty() { d.name.clone() } else { label.to_string() };
+    handles.save(&c);
+    config.set(c);
+}
+
 #[component]
 pub fn Devices() -> Element {
     let state = use_context::<AppState>();
     let handles = use_context::<Handles>();
 
-    let mut config = state.config;
+    let config = state.config;
+    let devices_rev = state.devices_rev;
     let mut query = use_signal(String::new);
     let mut only_watched = use_signal(|| false);
     let mut refresh = use_signal(|| 0u32);
+    // Some(snapshot) while detecting; `found` accumulates everything that
+    // differs from the snapshot, so a KVM toggle arriving in several bursts
+    // is still caught whole.
+    let mut detect = use_signal(|| None::<Vec<UsbDevice>>);
+    let mut found = use_signal(Vec::<UsbDevice>::new);
 
-    // Re-enumerates whenever `refresh` changes.
-    let present = use_memo(move || {
+    // Re-enumerates on Refresh and on every USB change the watcher reports.
+    let present_memo = use_memo(move || {
         let _ = refresh();
+        let _ = devices_rev();
         hardware::list_devices().unwrap_or_default()
+    });
+
+    use_effect(move || {
+        let now = present_memo();
+        if let Some(snapshot) = detect() {
+            found.with_mut(|f| {
+                for d in changed(&snapshot, &now) {
+                    if !f.iter().any(|x| x.id == d.id) {
+                        f.push(d);
+                    }
+                }
+            });
+        }
     });
 
     let cfg = config();
     let needle = query().to_lowercase();
-    let present = present();
+    let present = present_memo();
+    let label = |d: &UsbDevice| {
+        cfg.devices.iter().find(|e| e.id == d.id).map_or(d.name.clone(), |e| e.name.clone())
+    };
 
     // Configured devices that are not currently plugged in.
     let absent: Vec<_> = cfg
@@ -43,20 +104,22 @@ pub fn Devices() -> Element {
         .collect();
 
     let visible: Vec<_> = present
-        .into_iter()
+        .iter()
         .filter(|d| {
             (!only_watched() || cfg.watches(&d.id))
                 && (needle.is_empty()
+                    || label(d).to_lowercase().contains(&needle)
                     || d.name.to_lowercase().contains(&needle)
                     || d.id.to_lowercase().contains(&needle))
         })
+        .cloned()
         .collect();
 
     rsx! {
         h1 { "Devices" }
         p { style: "color:var(--text-dim); margin-top:-8px;",
             "Switch on the devices that move with your KVM. When any of them appears
-             or disappears, your monitors follow."
+             or disappears, your monitors follow. Click a watched device's name to rename it."
         }
 
         div { style: "display:flex; gap:10px; align-items:center; margin-bottom:14px;",
@@ -76,6 +139,53 @@ pub fn Devices() -> Element {
                 "Watched only"
             }
             button { class: "secondary", onclick: move |_| refresh += 1, "Refresh" }
+            if detect().is_none() {
+                button { class: "primary",
+                    onclick: move |_| {
+                        found.set(Vec::new());
+                        detect.set(Some(present_memo()));
+                    },
+                    "Detect"
+                }
+            }
+        }
+
+        if detect().is_some() {
+            div { class: "card",
+                div { style: "display:flex; justify-content:space-between; align-items:center;",
+                    span {
+                        if found().is_empty() {
+                            "Detecting… unplug or plug in a device, or toggle your KVM."
+                        } else {
+                            "Detected — keep going, or click Done."
+                        }
+                    }
+                    button { class: "secondary", onclick: move |_| detect.set(None), "Done" }
+                }
+                if !found().is_empty() {
+                    table {
+                        tbody {
+                            for d in found() {
+                                tr { key: "{d.id}",
+                                    td { "{icon(d.class)}" }
+                                    td { "{label(&d)}" }
+                                    td { style: "color:var(--text-dim); font-family:monospace", "{d.id}" }
+                                    td {
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: cfg.watches(&d.id),
+                                            onchange: {
+                                                let handles = handles.clone();
+                                                move |e: Event<FormData>| set_watched(config, &handles, &d, e.checked())
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         div { class: "card",
@@ -88,31 +198,32 @@ pub fn Devices() -> Element {
                         tr {
                             key: "{d.id}",
                             td { "{icon(d.class)}" }
-                            td { "{d.name}" }
+                            td {
+                                if cfg.watches(&d.id) {
+                                    input {
+                                        r#type: "text",
+                                        value: "{label(&d)}",
+                                        title: "{d.name}",
+                                        class: "rename",
+                                        style: "width:100%",
+                                        onchange: {
+                                            let handles = handles.clone();
+                                            let d = d.clone();
+                                            move |e: Event<FormData>| rename(config, &handles, &d, &e.value())
+                                        },
+                                    }
+                                } else {
+                                    "{d.name}"
+                                }
+                            }
                             td { style: "color:var(--text-dim); font-family:monospace", "{d.id}" }
                             td {
                                 input {
                                     r#type: "checkbox",
                                     checked: cfg.watches(&d.id),
                                     onchange: {
-                                        let d = d.clone();
                                         let handles = handles.clone();
-                                        move |e: Event<FormData>| {
-                                            let mut c = config();
-                                            if e.checked() {
-                                                if !c.watches(&d.id) {
-                                                    c.devices.push(DeviceEntry {
-                                                        id: d.id.clone(),
-                                                        name: d.name.clone(),
-                                                        class: d.class.as_str().to_string(),
-                                                    });
-                                                }
-                                            } else {
-                                                c.devices.retain(|x| x.id != d.id);
-                                            }
-                                            handles.save(&c);
-                                            config.set(c);
-                                        }
+                                        move |e: Event<FormData>| set_watched(config, &handles, &d, e.checked())
                                     },
                                 }
                             }
@@ -136,6 +247,7 @@ pub fn Devices() -> Element {
                                         onclick: {
                                             let id = e.id.clone();
                                             let handles = handles.clone();
+                                            let mut config = config;
                                             move |_| {
                                                 let mut c = config();
                                                 c.devices.retain(|x| x.id != id);
@@ -152,5 +264,23 @@ pub fn Devices() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dev(id: &str) -> UsbDevice {
+        UsbDevice { id: id.into(), name: id.into(), class: DeviceClass::Other }
+    }
+
+    #[test]
+    fn changed_reports_devices_that_came_and_went() {
+        let before = [dev("A"), dev("B")];
+        let after = [dev("B"), dev("C")];
+        let ids: Vec<_> = changed(&before, &after).into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, ["A", "C"]);
+        assert!(changed(&before, &before).is_empty());
     }
 }

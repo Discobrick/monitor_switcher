@@ -35,6 +35,8 @@ pub struct AppState {
     pub present: Signal<bool>,
     pub cooldown: Signal<Option<u64>>,
     pub tool_ok: Signal<bool>,
+    /// Bumped on every USB change so device lists re-enumerate.
+    pub devices_rev: Signal<u32>,
 }
 
 /// Shared handles the views need for side effects.
@@ -100,6 +102,7 @@ fn Root() -> Element {
         present: use_signal(|| false),
         cooldown: use_signal(|| None),
         tool_ok: use_signal(|| true),
+        devices_rev: use_signal(|| 0),
     };
     use_context_provider(|| state);
     use_context_provider(|| props.handles.clone());
@@ -131,6 +134,7 @@ fn Root() -> Element {
                     match ev {
                         Event::PresenceChanged(p) => state.present.set(p),
                         Event::Cooldown(c) => state.cooldown.set(c),
+                        Event::DevicesChanged => state.devices_rev += 1,
                         Event::Log(entry) => {
                             state.log.with_mut(|l| {
                                 l.push(entry);
