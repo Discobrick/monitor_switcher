@@ -178,13 +178,16 @@ pub fn combine(stext: Vec<parse::StextMonitor>, gdi: &[MonitorGeometry]) -> Vec<
         .collect()
 }
 
-/// Picks the VCP 60 value of the monitor with the given serial.
-pub fn input_for_serial(monitors: &[parse::StextMonitor], serial: &str) -> Result<u16, HardwareError> {
-    monitors
-        .iter()
-        .find(|m| m.serial == serial)
-        .and_then(|m| m.current_input)
-        .ok_or_else(|| HardwareError::UnknownSerial(serial.to_string()))
+/// Turns a `/GetValue` exit code into a VCP 60 input.
+///
+/// Only the low byte is the input: some monitors (seen on a Dell) put junk in
+/// the high byte, returning 0x0F0F for input 15. Zero is ControlMyMonitor's
+/// failure code and is never a valid input.
+pub fn input_from_exit_code(code: i32) -> Option<u16> {
+    match (code & 0xFF) as u16 {
+        0 => None,
+        v => Some(v),
+    }
 }
 
 /// The temp file a `/stext` dump is written to, removed on every exit path.
@@ -243,7 +246,7 @@ impl Drop for TempDump {
 /// empty result, so it is an error instead.
 pub fn parse_dump(bytes: &[u8]) -> Result<Vec<parse::StextMonitor>, HardwareError> {
     let text = decode_dump(bytes);
-    let monitors = parse::parse_stext(&text);
+    let monitors = parse::parse_smonitors(&text);
 
     if monitors.is_empty() && !text.trim().is_empty() {
         return Err(HardwareError::ToolFailed(format!(
@@ -494,32 +497,13 @@ mod tests {
         assert_eq!(out[2].x, -1920);
     }
 
-    // -- serial lookup ------------------------------------------------------
+    // -- /GetValue exit code -------------------------------------------------
 
     #[test]
-    fn the_input_is_looked_up_by_serial_not_position() {
-        let monitors = vec![
-            stext(r"\\.\DISPLAY1\Monitor0", "AAA", Some(15)),
-            stext(r"\\.\DISPLAY2\Monitor0", "BBB", Some(17)),
-        ];
-        assert_eq!(input_for_serial(&monitors, "BBB").unwrap(), 17);
-    }
-
-    #[test]
-    fn an_absent_serial_is_reported_as_unknown() {
-        let err = input_for_serial(&[], "GONE").unwrap_err();
-        assert!(matches!(err, HardwareError::UnknownSerial(s) if s == "GONE"));
-    }
-
-    /// A monitor whose dump had no VCP 60 block is as unusable as a missing
-    /// one, and must not silently read as some default input.
-    #[test]
-    fn a_monitor_without_a_vcp60_block_is_not_readable() {
-        let monitors = vec![stext(r"\\.\DISPLAY1\Monitor0", "AAA", None)];
-        assert!(matches!(
-            input_for_serial(&monitors, "AAA"),
-            Err(HardwareError::UnknownSerial(_))
-        ));
+    fn get_value_keeps_only_the_low_byte_and_treats_zero_as_failure() {
+        assert_eq!(input_from_exit_code(17), Some(17));
+        assert_eq!(input_from_exit_code(0x0F0F), Some(15), "Dell junk high byte");
+        assert_eq!(input_from_exit_code(0), None);
     }
 
     // -- dump decoding ------------------------------------------------------
@@ -558,19 +542,13 @@ mod tests {
 
     /// A decoded dump has to survive the real parser, not just compare equal.
     #[test]
-    fn a_utf16_dump_round_trips_through_the_stext_parser() {
-        let text = "Monitor Device Name: \\\\.\\DISPLAY1\\Monitor0\r\n\
-                    Monitor Name: DELL U2720Q\r\n\
-                    Serial Number: ABC123456\r\n\
-                    VCP Code: 60\r\n\
-                    Current Value: 15\r\n";
+    fn a_utf16_dump_round_trips_through_the_parser() {
         let mut bytes = vec![0xFF, 0xFE];
-        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes.extend(DUMP.encode_utf16().flat_map(u16::to_le_bytes));
 
-        let parsed = parse::parse_stext(&decode_dump(&bytes));
+        let parsed = parse::parse_smonitors(&decode_dump(&bytes));
         assert_eq!(parsed.len(), 1, "the decoded UTF-16 dump must parse");
-        assert_eq!(parsed[0].serial, "ABC123456");
-        assert_eq!(parsed[0].current_input, Some(15));
+        assert_eq!(parsed[0].serial, r"MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007");
     }
 
     // -- tool exit status ---------------------------------------------------
@@ -595,17 +573,16 @@ mod tests {
 
     // -- dump parsing guard -------------------------------------------------
 
-    const DUMP: &str = "Monitor Device Name: \\\\.\\DISPLAY1\\Monitor0\r\n\
-                        Monitor Name: DELL U2720Q\r\n\
-                        Serial Number: ABC123456\r\n\
-                        VCP Code: 60\r\n\
-                        Current Value: 15\r\n";
+    const DUMP: &str = "Monitor Device Name: \"\\\\.\\DISPLAY2\\Monitor0\"\r\n\
+                        Monitor Name: \"PHL 273V7\"\r\n\
+                        Serial Number: \"UK02215042535\"\r\n\
+                        Monitor ID: \"MONITOR\\PHLC156\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0007\"\r\n";
 
     #[test]
     fn a_good_dump_parses_to_its_monitors() {
         let parsed = parse_dump(DUMP.as_bytes()).unwrap();
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].serial, "ABC123456");
+        assert_eq!(parsed[0].model, "PHL 273V7");
     }
 
     /// The failure this guards: a BOM-less UTF-16 dump decodes lossily to text

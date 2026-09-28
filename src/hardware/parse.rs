@@ -1,11 +1,13 @@
-/// One monitor block from a ControlMyMonitor `/stext` dump.
+/// One monitor block from a ControlMyMonitor `/smonitors` dump.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StextMonitor {
     /// e.g. `\\.\DISPLAY1\Monitor0` — used only to correlate with GDI output.
     pub device_name: String,
     pub model: String,
+    /// Despite the name, the PnP Monitor ID (`MONITOR\DELA28A\{...}\0001`):
+    /// the stable key ControlMyMonitor accepts. See `parse_smonitors`.
     pub serial: String,
-    /// Current VCP 60 value, if the dump contained a VCP 60 block.
+    /// Current VCP 60 value, read separately via `/GetValue`.
     pub current_input: Option<u16>,
 }
 
@@ -41,71 +43,52 @@ pub fn extract_id_from_instance(instance_id: &str) -> Option<String> {
     Some(format_vid_pid(vid, pid))
 }
 
-/// Parses a ControlMyMonitor `/stext` dump.
+/// Parses a ControlMyMonitor `/smonitors` dump: one blank-line-separated
+/// block per monitor, values in double quotes.
 ///
-/// The dump repeats a block per monitor per VCP code. Blocks are accumulated
-/// by device name, and only the VCP 60 block contributes `current_input`.
+/// The stable key stored in `serial` is the PnP `Monitor ID`, because
+/// ControlMyMonitor does not accept serial numbers as a monitor argument and
+/// many monitors report none. `current_input` is left empty; the dump carries
+/// no VCP values, so the caller reads them with `/GetValue`.
 // ponytail: line-oriented "Key: Value" scan rather than a grammar; the format
-// is stable and NirSoft-generated. Revisit only if /stext output changes shape.
-pub fn parse_stext(text: &str) -> Vec<StextMonitor> {
+// is stable and NirSoft-generated.
+pub fn parse_smonitors(text: &str) -> Vec<StextMonitor> {
     let mut out: Vec<StextMonitor> = Vec::new();
-    let mut device_name = String::new();
-    let mut model = String::new();
-    let mut serial = String::new();
-    let mut vcp_code: Option<u16> = None;
-    let mut current: Option<u16> = None;
-
-    let flush = |out: &mut Vec<StextMonitor>,
-                 device_name: &str,
-                 model: &str,
-                 serial: &str,
-                 vcp_code: Option<u16>,
-                 current: Option<u16>| {
-        if device_name.is_empty() {
-            return;
-        }
-        let input = if vcp_code == Some(60) { current } else { None };
-
-        if let Some(existing) = out.iter_mut().find(|m: &&mut StextMonitor| m.device_name == device_name) {
-            if input.is_some() {
-                existing.current_input = input;
-            }
-            return;
-        }
-
-        out.push(StextMonitor {
-            device_name: device_name.to_string(),
-            model: model.to_string(),
-            serial: serial.to_string(),
-            current_input: input,
-        });
-    };
 
     for line in text.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let key = key.trim();
-        let value = value.trim();
+        let value = value.trim().trim_matches('"').to_string();
 
-        match key {
-            "Monitor Device Name" => {
-                flush(&mut out, &device_name, &model, &serial, vcp_code, current);
-                device_name = value.to_string();
-                model.clear();
-                serial.clear();
-                vcp_code = None;
-                current = None;
+        match key.trim() {
+            "Monitor Device Name" => out.push(StextMonitor {
+                device_name: value,
+                model: String::new(),
+                serial: String::new(),
+                current_input: None,
+            }),
+            "Monitor Name" => {
+                if let Some(m) = out.last_mut() {
+                    m.model = value;
+                }
             }
-            "Monitor Name" => model = value.to_string(),
-            "Serial Number" => serial = value.to_string(),
-            "VCP Code" => vcp_code = value.parse().ok(),
-            "Current Value" => current = value.parse().ok(),
+            "Monitor ID" => {
+                if let Some(m) = out.last_mut() {
+                    // `MONITOR\DELA28A\{...}\0001`: the second segment is the
+                    // EDID vendor+product code, the best name a blank model has.
+                    if m.model.is_empty() {
+                        m.model = value.split('\\').nth(1).unwrap_or_default().to_string();
+                    }
+                    m.serial = value;
+                }
+            }
             _ => {}
         }
     }
-    flush(&mut out, &device_name, &model, &serial, vcp_code, current);
 
+    // A block without a Monitor ID cannot be addressed, so it is not a monitor.
+    out.retain(|m| !m.serial.is_empty());
     out
 }
 
@@ -145,57 +128,37 @@ mod tests {
         );
     }
 
-    const SAMPLE_STEXT: &str = "\
-==================================================
-Monitor Device Name: \\\\.\\DISPLAY1\\Monitor0
-Monitor Name        : DELL U2720Q
-Serial Number       : ABC123456
-VCP Code            : 60
-VCP Code Name       : Input Select
-Current Value       : 15
-Maximum Value       : 18
-==================================================
-Monitor Device Name: \\\\.\\DISPLAY2\\Monitor0
-Monitor Name        : LG HDR 4K
-Serial Number       : XYZ987654
-VCP Code            : 60
-VCP Code Name       : Input Select
-Current Value       : 17
-Maximum Value       : 18
-==================================================
-";
+    /// Captured from a real machine: the first monitor reports no name and no
+    /// serial, which is common and must still yield an addressable monitor.
+    const SAMPLE: &str = r#"Monitor Device Name: "\\.\DISPLAY1\Monitor0"
+Monitor Name: ""
+Serial Number: ""
+Adapter Name: "NVIDIA GeForce RTX 3080 Ti"
+Monitor ID: "MONITOR\DELA28A\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001"
+
+Monitor Device Name: "\\.\DISPLAY2\Monitor0"
+Monitor Name: "PHL 273V7"
+Serial Number: "UK02215042535"
+Adapter Name: "NVIDIA GeForce RTX 3080 Ti"
+Monitor ID: "MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007"
+"#;
 
     #[test]
-    fn parses_stext_into_monitors() {
-        let monitors = parse_stext(SAMPLE_STEXT);
+    fn parses_smonitors_keyed_by_monitor_id() {
+        let monitors = parse_smonitors(SAMPLE);
         assert_eq!(monitors.len(), 2);
         assert_eq!(monitors[0].device_name, r"\\.\DISPLAY1\Monitor0");
-        assert_eq!(monitors[0].model, "DELL U2720Q");
-        assert_eq!(monitors[0].serial, "ABC123456");
-        assert_eq!(monitors[0].current_input, Some(15));
-        assert_eq!(monitors[1].serial, "XYZ987654");
-        assert_eq!(monitors[1].current_input, Some(17));
-    }
-
-    #[test]
-    fn ignores_vcp_codes_other_than_sixty() {
-        let text = "\
-Monitor Device Name: \\\\.\\DISPLAY1\\Monitor0
-Monitor Name        : DELL U2720Q
-Serial Number       : ABC123456
-VCP Code            : 16
-VCP Code Name       : Brightness
-Current Value       : 75
-Maximum Value       : 100
-";
-        let monitors = parse_stext(text);
-        assert_eq!(monitors.len(), 1);
-        assert_eq!(monitors[0].current_input, None);
+        assert_eq!(monitors[0].serial, r"MONITOR\DELA28A\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001");
+        assert_eq!(monitors[0].model, "DELA28A", "a blank name falls back to the EDID code");
+        assert_eq!(monitors[1].model, "PHL 273V7");
+        assert_eq!(monitors[1].serial, r"MONITOR\PHLC156\{4d36e96e-e325-11ce-bfc1-08002be10318}\0007");
+        assert!(monitors.iter().all(|m| m.current_input.is_none()));
     }
 
     #[test]
     fn tolerates_empty_or_garbage_input() {
-        assert!(parse_stext("").is_empty());
-        assert!(parse_stext("no colons here at all").is_empty());
+        assert!(parse_smonitors("").is_empty());
+        assert!(parse_smonitors("no colons here at all").is_empty());
+        assert!(parse_smonitors("Monitor Device Name: \"x\"").is_empty(), "no Monitor ID, not addressable");
     }
 }

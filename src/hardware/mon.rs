@@ -1,8 +1,9 @@
 //! Monitor discovery and control.
 //!
-//! Geometry comes from GDI (`EnumDisplayMonitors`); identity and current input
-//! come from a ControlMyMonitor `/stext` dump. The two are correlated on the
-//! `\\.\DISPLAYn` prefix, which both sides report.
+//! Geometry comes from GDI (`EnumDisplayMonitors`); identity comes from a
+//! ControlMyMonitor `/smonitors` dump and the current input from `/GetValue`.
+//! Geometry and identity are correlated on the `\\.\DISPLAYn` prefix, which
+//! both sides report.
 //!
 //! Everything here that is not Win32 FFI or process spawning lives in the
 //! parent module, where it is testable on any platform.
@@ -19,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
 
 use super::parse::StextMonitor;
 use super::{
-    combine, input_for_serial, parse_dump, tool_error, HardwareError, MonitorGeometry, MonitorInfo,
+    combine, input_from_exit_code, parse_dump, tool_error, HardwareError, MonitorGeometry, MonitorInfo,
     TempDump,
 };
 
@@ -28,18 +29,31 @@ use super::{
 const VCP_INPUT_SELECT: &str = "60";
 
 pub fn list_monitors(tool: &Path) -> Result<Vec<MonitorInfo>, HardwareError> {
-    Ok(combine(dump_stext(tool)?, &enumerate_gdi()))
+    let mut monitors = dump_smonitors(tool)?;
+    for m in &mut monitors {
+        // One ~150ms DDC read each; a monitor that won't answer just shows "?".
+        m.current_input = read_input(tool, &m.serial).ok();
+    }
+    Ok(combine(monitors, &enumerate_gdi()))
 }
 
+/// Reads VCP 60 via `/GetValue`, which reports the value as its exit code.
 pub fn read_input(tool: &Path, serial: &str) -> Result<u16, HardwareError> {
-    input_for_serial(&dump_stext(tool)?, serial)
+    let args = ["/GetValue", serial, VCP_INPUT_SELECT].map(OsStr::new);
+    let output = run(tool, &args)?;
+    output
+        .status
+        .code()
+        .and_then(input_from_exit_code)
+        .ok_or_else(|| HardwareError::UnknownSerial(serial.to_string()))
 }
 
-/// Sets VCP 60 on the monitor with the given serial.
+/// Sets VCP 60 on the monitor with the given key (its PnP Monitor ID).
 ///
-/// ControlMyMonitor accepts a serial number directly as its monitor argument,
+/// ControlMyMonitor accepts the Monitor ID directly as its monitor argument,
 /// so no display-index lookup is needed at switch time — which matters, because
-/// display indices shuffle on replug and reboot while serials do not.
+/// display indices shuffle on replug and reboot while Monitor IDs do not.
+/// (It does not accept serial numbers, despite what the field is called.)
 pub fn apply_input(tool: &Path, serial: &str, value: u16) -> Result<(), HardwareError> {
     let value = value.to_string();
     let args = ["/SetValue", serial, VCP_INPUT_SELECT, &value].map(OsStr::new);
@@ -52,10 +66,10 @@ pub fn apply_input(tool: &Path, serial: &str, value: u16) -> Result<(), Hardware
     }
 }
 
-/// Runs `/stext` into a temp file and parses it.
-fn dump_stext(tool: &Path) -> Result<Vec<StextMonitor>, HardwareError> {
+/// Runs `/smonitors` into a temp file and parses it.
+fn dump_smonitors(tool: &Path) -> Result<Vec<StextMonitor>, HardwareError> {
     let dump = TempDump::new();
-    let output = run(tool, &[OsStr::new("/stext"), dump.path().as_os_str()])?;
+    let output = run(tool, &[OsStr::new("/smonitors"), dump.path().as_os_str()])?;
 
     if !output.status.success() {
         return Err(tool_error(output.status.code(), &output.stderr));
