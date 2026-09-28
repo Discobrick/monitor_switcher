@@ -46,15 +46,21 @@ pub struct AppState {
 /// and stores the result in `target`. Runs once at launch and on Refresh.
 pub fn scan_monitors(mut target: Signal<Option<Result<Vec<MonitorInfo>, String>>>, tool: PathBuf) {
     target.set(None);
+    spawn(async move {
+        let result = off_thread(move || hardware::list_monitors(&tool).map_err(|e| e.to_string())).await;
+        target.set(Some(result));
+    });
+}
+
+/// Runs blocking work (a ControlMyMonitor call, a sleep) on its own thread so
+/// the UI keeps painting, and awaits its result.
+// ponytail: a thread per call; fine for a handful of user-triggered calls.
+pub async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = futures_channel::oneshot::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(hardware::list_monitors(&tool).map_err(|e| e.to_string()));
+        let _ = tx.send(work());
     });
-    spawn(async move {
-        if let Ok(result) = rx.await {
-            target.set(Some(result));
-        }
-    });
+    rx.await.expect("worker thread panicked")
 }
 
 /// Shared handles the views need for side effects.

@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 
 use crate::app::tool_path;
 use crate::config::MonitorRule;
-use crate::hardware::MonitorInfo;
-use crate::ui::{scan_monitors, AppState, Handles};
+use crate::hardware::{self, MonitorInfo};
+use crate::ui::{off_thread, scan_monitors, AppState, Handles};
 
 /// Standard DDC/CI input-select values. Vendors deviate, which is why the
 /// custom field and the Test button exist.
@@ -128,15 +128,18 @@ pub fn Monitors() -> Element {
         }
 
         if let Some(mon) = monitors.get(selected()) {
-            MonitorPanel { monitor: mon.clone() }
+            // Keyed so a test running on one monitor doesn't follow the selection.
+            MonitorPanel { key: "{mon.monitor_id}", monitor: mon.clone() }
         }
 
         {
             let cfg = config();
+            // Mid-scan the list is empty; don't flash every rule as unmatched.
+            let scanned = matches!(scan, Some(Ok(_)));
             let unmatched: Vec<MonitorRule> = cfg
                 .monitors
                 .iter()
-                .filter(|r| r.monitor_id.is_empty() || !monitors.iter().any(|m| m.monitor_id == r.monitor_id))
+                .filter(|r| scanned && !monitors.iter().any(|m| m.monitor_id == r.monitor_id))
                 .cloned()
                 .collect();
 
@@ -183,11 +186,259 @@ pub fn Monitors() -> Element {
     }
 }
 
-// ponytail: stub until Task 14 builds the input-rule panel.
+#[derive(Clone, PartialEq)]
+enum TestPhase {
+    Idle,
+    /// Showing the candidate, counting down before the automatic revert.
+    Running { candidate: u16, seconds_left: u8 },
+    /// Reverted; waiting for the user to say what to do with the candidate.
+    Asking { candidate: u16 },
+    Failed { message: String },
+}
+
+const TEST_SECONDS: u8 = 8;
+
+/// Input rules for one monitor, plus a test that reverts *before* asking,
+/// since mid-test this window may be on an input the user can't see.
 #[component]
 fn MonitorPanel(monitor: MonitorInfo) -> Element {
-    let _ = monitor;
-    rsx! { div {} }
+    let state = use_context::<AppState>();
+    let handles = use_context::<Handles>();
+
+    let mut config = state.config;
+    let mut phase = use_signal(|| TestPhase::Idle);
+    let mut candidate = use_signal(|| 15u16);
+
+    let cfg = config();
+    let saved = cfg.monitors.iter().find(|r| r.monitor_id == monitor.monitor_id).cloned();
+    let rule = saved.clone().unwrap_or(MonitorRule {
+        monitor_id: monitor.monitor_id.clone(),
+        label: monitor.model.clone(),
+        on_connect: monitor.current_input.unwrap_or(15),
+        on_disconnect: monitor.current_input.unwrap_or(17),
+    });
+
+    // Writes a rule field, creating the rule if this monitor has none yet.
+    let write_rule = {
+        let handles = handles.clone();
+        let rule = rule.clone();
+        move |on_connect: Option<u16>, on_disconnect: Option<u16>| {
+            let mut c = config();
+            let mut r = c
+                .monitors
+                .iter()
+                .find(|x| x.monitor_id == rule.monitor_id)
+                .cloned()
+                .unwrap_or_else(|| rule.clone());
+            r.on_connect = on_connect.unwrap_or(r.on_connect);
+            r.on_disconnect = on_disconnect.unwrap_or(r.on_disconnect);
+            c.monitors.retain(|x| x.monitor_id != r.monitor_id);
+            c.monitors.push(r);
+            handles.save(&c);
+            config.set(c);
+        }
+    };
+
+    let cooling_down = (state.cooldown)().is_some();
+
+    rsx! {
+        div { class: "card",
+            h2 { "{monitor.model}" }
+            p { style: "color:var(--text-dim); margin-top:-4px; font-family:monospace; font-size:12px;",
+                "{monitor.device_name} · {monitor.width}×{monitor.height}"
+                if monitor.is_primary { " · primary" }
+            }
+
+            div { style: "display:flex; gap:24px; flex-wrap:wrap; margin-top:12px;",
+                InputChooser {
+                    label: "When the KVM is connected",
+                    value: rule.on_connect,
+                    on_change: {
+                        let mut write_rule = write_rule.clone();
+                        move |v| write_rule(Some(v), None)
+                    },
+                }
+                InputChooser {
+                    label: "When the KVM is disconnected",
+                    value: rule.on_disconnect,
+                    on_change: {
+                        let mut write_rule = write_rule.clone();
+                        move |v| write_rule(None, Some(v))
+                    },
+                }
+            }
+
+            div { style: "margin-top:12px; color:var(--text-dim);",
+                if saved.is_some() {
+                    button { class: "secondary",
+                        onclick: {
+                            let handles = handles.clone();
+                            let id = monitor.monitor_id.clone();
+                            move |_| {
+                                let mut c = config();
+                                c.monitors.retain(|x| x.monitor_id != id);
+                                handles.save(&c);
+                                config.set(c);
+                            }
+                        },
+                        "Stop switching this monitor"
+                    }
+                } else {
+                    "Not switching yet — pick an input above to start."
+                }
+            }
+        }
+
+        div { class: "card",
+            h2 { "Test an input" }
+            p { style: "color:var(--text-dim); margin-top:-4px;",
+                "The monitor switches to the chosen input for {TEST_SECONDS} seconds, then
+                 switches back on its own. You are asked what to do with it afterwards, so
+                 you are never stranded on an input you cannot see."
+            }
+
+            match phase() {
+                TestPhase::Idle => rsx! {
+                    div { style: "display:flex; gap:10px; align-items:center;",
+                        select {
+                            value: "{candidate}",
+                            onchange: move |e| {
+                                if let Ok(v) = e.value().parse::<u16>() { candidate.set(v) }
+                            },
+                            for (v, name) in INPUT_PRESETS {
+                                option { value: "{v}", "{name} ({v})" }
+                            }
+                        }
+                        input {
+                            r#type: "number", min: "1", max: "255",
+                            style: "width:90px",
+                            value: "{candidate}",
+                            oninput: move |e| {
+                                if let Ok(v) = e.value().parse::<u16>() { candidate.set(v) }
+                            },
+                        }
+                        button {
+                            class: "primary",
+                            disabled: cooling_down,
+                            onclick: {
+                                let dir = handles.dir.clone();
+                                let id = monitor.monitor_id.clone();
+                                move |_| {
+                                    let tool = tool_path(&config(), &dir);
+                                    let id = id.clone();
+                                    let target = candidate();
+                                    phase.set(TestPhase::Running { candidate: target, seconds_left: TEST_SECONDS });
+                                    spawn(async move {
+                                        let switched = {
+                                            let (tool, id) = (tool.clone(), id.clone());
+                                            off_thread(move || {
+                                                let previous = hardware::read_input(&tool, &id)?;
+                                                hardware::apply_input(&tool, &id, target)?;
+                                                Ok::<_, hardware::HardwareError>(previous)
+                                            })
+                                            .await
+                                        };
+                                        let previous = match switched {
+                                            Ok(p) => p,
+                                            Err(e) => {
+                                                phase.set(TestPhase::Failed { message: e.to_string() });
+                                                return;
+                                            }
+                                        };
+
+                                        // Count down, then revert unconditionally.
+                                        for seconds_left in (0..TEST_SECONDS).rev() {
+                                            off_thread(|| std::thread::sleep(std::time::Duration::from_secs(1))).await;
+                                            phase.set(TestPhase::Running { candidate: target, seconds_left });
+                                        }
+                                        match off_thread(move || hardware::apply_input(&tool, &id, previous)).await {
+                                            Ok(()) => phase.set(TestPhase::Asking { candidate: target }),
+                                            Err(e) => phase.set(TestPhase::Failed {
+                                                message: format!("could not switch back: {e}"),
+                                            }),
+                                        }
+                                    });
+                                }
+                            },
+                            "Test"
+                        }
+                        if cooling_down {
+                            span { style: "color:var(--text-dim)",
+                                "Testing is paused while a switch cooldown is active."
+                            }
+                        }
+                    }
+                },
+
+                TestPhase::Running { candidate, seconds_left } => rsx! {
+                    div { class: "banner warn",
+                        "Showing {input_label(candidate)} — switching back in {seconds_left}s."
+                    }
+                },
+
+                TestPhase::Asking { candidate } => rsx! {
+                    div { class: "card", style: "background:var(--bg-raised)",
+                        p { "Did {input_label(candidate)} show the right source?" }
+                        div { style: "display:flex; gap:8px; flex-wrap:wrap;",
+                            button { class: "primary",
+                                onclick: {
+                                    let mut write_rule = write_rule.clone();
+                                    move |_| { write_rule(Some(candidate), None); phase.set(TestPhase::Idle); }
+                                },
+                                "Use when KVM connected"
+                            }
+                            button { class: "primary",
+                                onclick: {
+                                    let mut write_rule = write_rule.clone();
+                                    move |_| { write_rule(None, Some(candidate)); phase.set(TestPhase::Idle); }
+                                },
+                                "Use when KVM disconnected"
+                            }
+                            button { class: "secondary",
+                                onclick: move |_| phase.set(TestPhase::Idle),
+                                "Discard"
+                            }
+                        }
+                    }
+                },
+
+                TestPhase::Failed { message } => rsx! {
+                    div { class: "banner err", "Test failed: {message}" }
+                    button { class: "secondary", onclick: move |_| phase.set(TestPhase::Idle), "Back" }
+                },
+            }
+        }
+    }
+}
+
+#[component]
+fn InputChooser(label: String, value: u16, on_change: EventHandler<u16>) -> Element {
+    rsx! {
+        div {
+            div { style: "color:var(--text-dim); margin-bottom:6px;", "{label}" }
+            select {
+                value: "{value}",
+                onchange: move |e| {
+                    if let Ok(v) = e.value().parse::<u16>() { on_change.call(v) }
+                },
+                for (v, name) in INPUT_PRESETS {
+                    option { value: "{v}", selected: *v == value, "{name} ({v})" }
+                }
+                if !INPUT_PRESETS.iter().any(|(v, _)| *v == value) {
+                    option { value: "{value}", selected: true, "Custom ({value})" }
+                }
+            }
+            input {
+                r#type: "number", min: "1", max: "255",
+                style: "width:90px; margin-left:8px;",
+                value: "{value}",
+                // onchange, not oninput: save once per edit, not per keystroke.
+                onchange: move |e| {
+                    if let Ok(v) = e.value().parse::<u16>() { on_change.call(v) }
+                },
+            }
+        }
+    }
 }
 
 #[cfg(test)]
