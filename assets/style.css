@@ -90,7 +90,7 @@ button.primary {
   background: var(--accent); color: #fff; border: 0;
   padding: 7px 14px; border-radius: var(--radius); cursor: pointer; font: inherit;
 }
-button.secondary {
+button.secondary, label.secondary {
   background: var(--bg-raised); color: var(--text); border: 1px solid var(--border);
   padding: 7px 14px; border-radius: var(--radius); cursor: pointer; font: inherit;
 }

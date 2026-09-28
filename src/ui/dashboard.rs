@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::app::{Command, Severity};
-use crate::ui::{AppState, Handles};
+use crate::app::Severity;
+use crate::ui::{set_monitoring, AppState, Handles};
 
 /// Pill CSS class and label for the KVM presence indicator. Pure so it's
 /// reachable by `cargo test` without a running component tree.
@@ -28,7 +28,7 @@ pub fn Dashboard() -> Element {
     let state = use_context::<AppState>();
     let handles = use_context::<Handles>();
 
-    let mut config = state.config;
+    let config = state.config;
     let present = (state.present)();
     let cooldown = (state.cooldown)();
     let enabled = config().monitoring_enabled;
@@ -49,13 +49,7 @@ pub fn Dashboard() -> Element {
             div { style: "margin-top:14px; display:flex; align-items:center; gap:14px;",
                 button {
                     class: if enabled { "secondary" } else { "primary" },
-                    onclick: move |_| {
-                        let mut c = config();
-                        c.monitoring_enabled = !c.monitoring_enabled;
-                        let _ = handles.commands.send(Command::SetMonitoring(c.monitoring_enabled));
-                        handles.save(&c);
-                        config.set(c);
-                    },
+                    onclick: move |_| set_monitoring(config, &handles, !enabled),
                     if enabled { "Pause monitoring" } else { "Resume monitoring" }
                 }
 

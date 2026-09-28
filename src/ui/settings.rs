@@ -30,6 +30,16 @@ pub fn Settings() -> Element {
         }
     };
 
+    let set_tool_path = {
+        let handles = handles.clone();
+        let mut tool_changed = tool_changed.clone();
+        move |path: String| {
+            config.write().control_my_monitor_path = path.trim().to_string();
+            handles.save(&config());
+            tool_changed();
+        }
+    };
+
     rsx! {
         h1 { "Settings" }
 
@@ -81,20 +91,35 @@ pub fn Settings() -> Element {
                 div { style: "color:var(--text-dim); margin-bottom:4px;",
                     "Or point at an existing copy (leave empty to use the one next to the app):"
                 }
-                input {
-                    r#type: "text",
-                    style: "width:100%",
-                    placeholder: r"C:\Tools\ControlMyMonitor.exe",
-                    value: "{cfg.control_my_monitor_path}",
-                    onchange: {
-                        let handles = handles.clone();
-                        let mut tool_changed = tool_changed.clone();
-                        move |e: Event<FormData>| {
-                            config.write().control_my_monitor_path = e.value().trim().to_string();
-                            handles.save(&config());
-                            tool_changed();
+                div { style: "display:flex; gap:8px; align-items:center;",
+                    input {
+                        r#type: "text",
+                        style: "flex:1",
+                        placeholder: r"C:\Tools\ControlMyMonitor.exe",
+                        value: "{cfg.control_my_monitor_path}",
+                        onchange: {
+                            let mut set_tool_path = set_tool_path.clone();
+                            move |e: Event<FormData>| set_tool_path(e.value())
+                        },
+                    }
+                    // Dioxus desktop answers a file input with a native dialog
+                    // and real paths; the label makes it look like a button.
+                    label { class: "secondary",
+                        "Browse…"
+                        input {
+                            r#type: "file",
+                            accept: ".exe",
+                            style: "display:none",
+                            onchange: {
+                                let mut set_tool_path = set_tool_path.clone();
+                                move |e: Event<FormData>| {
+                                    if let Some(file) = e.files().first() {
+                                        set_tool_path(file.path().display().to_string());
+                                    }
+                                }
+                            },
                         }
-                    },
+                    }
                 }
             }
 

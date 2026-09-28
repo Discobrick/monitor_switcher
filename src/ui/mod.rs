@@ -58,6 +58,14 @@ pub fn scan_monitors(mut target: Signal<Option<Result<Vec<MonitorInfo>, String>>
     });
 }
 
+/// Pauses or resumes monitoring: tells the watcher and persists the choice.
+/// Shared by the dashboard button and the tray menu.
+pub fn set_monitoring(mut config: Signal<Config>, handles: &Handles, on: bool) {
+    config.write().monitoring_enabled = on;
+    let _ = handles.commands.send(Command::SetMonitoring(on));
+    handles.save(&config.peek());
+}
+
 /// First launch: fetch ControlMyMonitor if it's missing, then set
 /// `setup_done` so it's never fetched unasked again. A failed download (say,
 /// offline) leaves the flag unset and retries next launch; Settings can
@@ -242,30 +250,52 @@ fn Root() -> Element {
     {
         use dioxus::desktop::trayicon::{
             Icon, init_tray_icon,
-            menu::{Menu, MenuItem},
+            menu::{Menu, MenuItem, PredefinedMenuItem},
         };
 
-        let (open_id, quit_id) = use_hook(|| {
-            let menu = Menu::new();
+        fn pause_label(enabled: bool) -> &'static str {
+            if enabled { "Pause monitoring" } else { "Resume monitoring" }
+        }
+
+        let (open, pause, settings, quit) = use_hook(|| {
             let open = MenuItem::new("Open", true, None);
+            let pause = MenuItem::new(pause_label(props.initial.monitoring_enabled), true, None);
+            let settings = MenuItem::new("Settings", true, None);
             let quit = MenuItem::new("Quit", true, None);
-            let open_id = open.id().clone();
-            let quit_id = quit.id().clone();
+
+            let menu = Menu::new();
             let _ = menu.append(&open);
+            let _ = menu.append(&pause);
+            let _ = menu.append(&settings);
+            let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&quit);
 
             let icon = Icon::from_path("icon.ico", Some((32, 32))).ok();
             init_tray_icon(menu, icon);
 
-            (open_id, quit_id)
+            (open, pause, settings, quit)
         });
 
+        // Keep the label in step however monitoring was toggled.
+        use_effect({
+            let pause = pause.clone();
+            move || pause.set_text(pause_label((state.config)().monitoring_enabled))
+        });
+
+        let handles = props.handles.clone();
+        let mut tab = tab;
         dioxus::desktop::use_tray_menu_event_handler(move |event| {
             let id = event.id();
-            if *id == quit_id {
+            if id == quit.id() {
                 std::process::exit(0);
-            } else if *id == open_id {
+            } else if id == open.id() {
                 dioxus::desktop::window().set_visible(true);
+            } else if id == settings.id() {
+                tab.set(Tab::Settings);
+                dioxus::desktop::window().set_visible(true);
+            } else if id == pause.id() {
+                let on = !state.config.peek().monitoring_enabled;
+                set_monitoring(state.config, &handles, on);
             }
         });
     }
