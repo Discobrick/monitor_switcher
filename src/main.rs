@@ -1,3 +1,7 @@
+// Release builds are a tray app with no console window; debug builds keep the
+// console so logs and panics stay visible while developing.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use monitor_switcher::{app, ui, watcher};
 
 use std::sync::mpsc::channel;

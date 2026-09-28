@@ -79,8 +79,7 @@ mod tests {
     /// UI must fall back, not get a spawn of "  ".
     #[test]
     fn a_blank_override_is_treated_as_unset() {
-        let mut cfg = Config::default();
-        cfg.control_my_monitor_path = "   ".into();
+        let cfg = Config { control_my_monitor_path: "   ".into(), ..Config::default() };
         assert_eq!(
             tool_path(&cfg, Path::new("/opt/msw")),
             PathBuf::from("/opt/msw/ControlMyMonitor.exe")
@@ -89,8 +88,10 @@ mod tests {
 
     #[test]
     fn a_configured_override_wins_over_the_exe_directory() {
-        let mut cfg = Config::default();
-        cfg.control_my_monitor_path = r"D:\tools\ControlMyMonitor.exe".into();
+        let cfg = Config {
+            control_my_monitor_path: r"D:\tools\ControlMyMonitor.exe".into(),
+            ..Config::default()
+        };
         assert_eq!(
             tool_path(&cfg, Path::new("/opt/msw")),
             PathBuf::from(r"D:\tools\ControlMyMonitor.exe")

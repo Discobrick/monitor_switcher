@@ -17,7 +17,7 @@ pub fn parse_vid_pid(id: &str) -> Option<(u16, u16)> {
     let mut vid = None;
     let mut pid = None;
 
-    for part in upper.split(|c: char| c == '&' || c == '\\') {
+    for part in upper.split(['&', '\\']) {
         if let Some(hex) = part.strip_prefix("VID_") {
             vid = u16::from_str_radix(hex, 16).ok();
         } else if let Some(hex) = part.strip_prefix("PID_") {

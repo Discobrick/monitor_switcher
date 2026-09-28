@@ -187,8 +187,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let mut c = Config::default();
-        c.cooldown_secs = 90;
+        let mut c = Config { cooldown_secs: 90, ..Config::default() };
         c.devices.push(DeviceEntry {
             id: "VID_046D&PID_085C".into(),
             name: "Logitech G502 HERO".into(),
