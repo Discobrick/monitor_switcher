@@ -39,25 +39,36 @@ Open **Devices**. This lists every USB device currently connected:
 Many devices have generic names like "USB Input Device", so the easiest way to find the right
 ones is **Detect**:
 
-1. Click **Detect**.
-2. Toggle your KVM to the other computer and back.
-3. The devices that came and went are listed. These are the ones that follow your KVM.
+1. Click **Detect**. It waits for devices to come or go:
 
-![Detect waits for devices to come or go](images/setup/03-detect.png)
+   ![Detect waits for devices to come or go](images/setup/03-detect.png)
 
-Tick **Watch** for one or more of them. Your KVM keyboard and mouse are good choices. Don't
-tick hubs or devices built into this computer or the monitor, since they never move.
+2. Toggle your KVM to the other computer and back. The devices that came and went are listed
+   at the top. These are the ones that follow your KVM:
 
-Click any device's name to give it a label you'll recognise:
+   ![Detect found the device that moved with the KVM](images/setup/04-detect-found.png)
 
-![A watched device, renamed "KVM keyboard"](images/setup/04-watch-and-rename.png)
+3. Click a found device's name to give it a label you'll recognise, for example the model of
+   your mouse, then press Enter:
+
+   ![Renaming the detected device to "Kone XP Air"](images/setup/05-detect-rename.png)
+
+4. Tick **Watch** for it, then click **Done**.
+
+Watch one or more devices. Your KVM keyboard and mouse are good choices. Don't tick hubs or
+devices built into this computer or the monitor, since they never move.
+
+You can rename any device in the main list too, watched or not. Labels stay in the list, so
+later you can tell your devices apart at a glance:
+
+![A watched device in the main list, renamed "KVM keyboard"](images/setup/06-watch-and-rename.png)
 
 ## 3. Tell each monitor which input to use
 
 Open **Monitors**. Your screens are drawn as they're arranged in Windows, with the input each
 one is showing right now:
 
-![The Monitors page shows your screen layout and current inputs](images/setup/05-monitors.png)
+![The Monitors page shows your screen layout and current inputs](images/setup/07-monitors.png)
 
 Click a screen, then choose two inputs:
 
@@ -67,12 +78,12 @@ Click a screen, then choose two inputs:
 The dropdowns list the inputs the monitor itself reports. The first time you select a monitor
 this takes a few seconds; common inputs are shown meanwhile.
 
-![The dropdown lists the monitor's own inputs](images/setup/06-input-dropdown.png)
+![The dropdown lists the monitor's own inputs](images/setup/08-input-dropdown.png)
 
 As soon as you pick an input the monitor starts switching. **Stop switching this monitor**
 removes its rule again.
 
-![A monitor with both inputs set](images/setup/07-monitor-rule.png)
+![A monitor with both inputs set](images/setup/09-monitor-rule.png)
 
 Repeat for each monitor that should switch. Monitors you leave alone are never touched.
 
@@ -85,7 +96,7 @@ monitors vary, so use **Test** to be sure.
 Below the inputs, **Test an input** switches the monitor to the input you pick for a short
 while, then switches it back by itself:
 
-![Test an input](images/setup/08-test.png)
+![Test an input](images/setup/10-test.png)
 
 1. Choose an input and click **Test**.
 2. The monitor switches. Watch what it shows. If the other computer is slow to wake, click
@@ -99,7 +110,7 @@ an input you can't see.
 
 ## 5. Settings
 
-![Settings](images/setup/09-settings.png)
+![Settings](images/setup/11-settings.png)
 
 - **Run at startup**: starts Monitor Switcher when you sign in to Windows.
 - **Switch cooldown**: after a switch, further switches are held off for this long, so a KVM
@@ -114,9 +125,12 @@ an input you can't see.
 That's it. The **Dashboard** shows whether your KVM is currently connected to this computer,
 and **Activity** lists every switch:
 
-![The dashboard with the KVM connected](images/setup/10-dashboard-connected.png)
+![The dashboard with the KVM connected](images/setup/12-dashboard-connected.png)
 
-Closing the window keeps the app running in the system tray. Right-click the tray icon for:
+Closing the window keeps the app running in the system tray. Right-click the tray icon (it may
+be under the `^` arrow on the taskbar) for:
+
+![The tray menu](images/setup/13-tray-menu.png)
 
 - **Open**: shows the window again.
 - **Pause monitoring / Resume monitoring**: stops or restarts switching, for example while you
