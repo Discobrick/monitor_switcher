@@ -146,8 +146,8 @@ pub fn Devices() -> Element {
     rsx! {
         h1 { "Devices" }
         p { style: "color:var(--text-dim); margin-top:-8px;",
-            "Switch on the devices that move with your KVM. When any of them appears
-             or disappears, your monitors follow. Click any device's name to rename it."
+            "Switch on the devices that move with your KVM. When all of them
+             disappear or all come back, your monitors follow. Click any device's name to rename it."
         }
 
         div { style: "display:flex; gap:10px; align-items:center; margin-bottom:14px;",
