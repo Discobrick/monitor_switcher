@@ -180,9 +180,28 @@ fn apply_all(cfg: &Config, dir: &Path, present: bool, tx: &Sender<Event>) {
     }
 }
 
-fn any_watched_present(cfg: &Config) -> bool {
+/// Connected only once *all* watched devices are present, disconnected only
+/// once *none* are. A partial set keeps `previous`, so unplugging (or
+/// replugging) a single device never switches the monitors.
+fn presence(connected: usize, total: usize, previous: Option<bool>) -> bool {
+    match connected {
+        0 => false,
+        n if n == total => true,
+        // Partial at startup counts as connected, so a later full unplug still switches.
+        _ => previous.unwrap_or(true),
+    }
+}
+
+fn watched_present(cfg: &Config, previous: Option<bool>) -> bool {
     match hardware::list_devices() {
-        Ok(devices) => devices.iter().any(|d| cfg.watches(&d.id)),
+        Ok(devices) => {
+            let connected = cfg
+                .devices
+                .iter()
+                .filter(|w| devices.iter().any(|d| d.id == w.id))
+                .count();
+            presence(connected, cfg.devices.len(), previous)
+        }
         Err(_) => false,
     }
 }
@@ -211,7 +230,7 @@ pub fn run(
     // Establish the baseline without switching anything.
     {
         let c = cfg.lock().expect("config poisoned");
-        let present = any_watched_present(&c);
+        let present = watched_present(&c, None);
         state.evaluate(present, Instant::now());
         let _ = tx.send(Event::PresenceChanged(present));
     }
@@ -229,7 +248,7 @@ pub fn run(
                 enabled = c.monitoring_enabled;
                 // The watch list may have changed: show the right status now,
                 // and don't let the next USB event mistake it for a KVM switch.
-                let present = any_watched_present(&c);
+                let present = watched_present(&c, state.last_state());
                 if state.last_state() != Some(present) {
                     let _ = tx.send(Event::PresenceChanged(present));
                 }
@@ -256,7 +275,7 @@ pub fn run(
 
         if enabled && (woken || poked) {
             let c = cfg.lock().expect("config poisoned");
-            let present = any_watched_present(&c);
+            let present = watched_present(&c, state.last_state());
 
             if state.last_state() != Some(present) {
                 let _ = tx.send(Event::PresenceChanged(present));
@@ -276,7 +295,7 @@ pub fn run(
         if enabled && let Some(action) = state.tick(now) {
             debug_assert_eq!(action, Action::Resync);
             let c = cfg.lock().expect("config poisoned");
-            let present = any_watched_present(&c);
+            let present = watched_present(&c, state.last_state());
             log(&tx, Severity::Info, "Cooldown expired, resyncing monitors");
             apply_all(&c, &dir, present, &tx);
         }
@@ -453,6 +472,16 @@ mod tests {
 
     fn state() -> (WatcherState, Instant) {
         (WatcherState::new(Duration::from_secs(60)), Instant::now())
+    }
+
+    #[test]
+    fn presence_switches_only_when_all_or_none_are_present() {
+        assert!(presence(2, 2, Some(false)), "all back -> connected");
+        assert!(!presence(0, 2, Some(true)), "all gone -> disconnected");
+        assert!(presence(1, 2, Some(true)), "one unplugged keeps connected");
+        assert!(!presence(1, 2, Some(false)), "one replugged keeps disconnected");
+        assert!(presence(1, 2, None), "partial at startup counts as connected");
+        assert!(!presence(0, 0, None), "nothing watched is never connected");
     }
 
     #[test]
