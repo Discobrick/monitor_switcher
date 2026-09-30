@@ -103,6 +103,17 @@ impl WatcherState {
         None
     }
 
+    /// Adopts `present` as the new baseline without switching anything.
+    ///
+    /// For when the *watch list* changed rather than the hardware: ticking a
+    /// device that is already plugged in must not read as "just connected"
+    /// (now or at the next unrelated USB event) and switch the monitors.
+    /// Any pending resync is dropped, since it was about the old watch list.
+    pub fn rebaseline(&mut self, present: bool) {
+        self.last_state = Some(present);
+        self.applied = Some(present);
+    }
+
     pub fn cooldown_remaining(&self, now: Instant) -> Option<Duration> {
         self.cooldown_until.filter(|until| *until > now).map(|until| until - now)
     }
@@ -216,6 +227,13 @@ pub fn run(
                 let c = cfg.lock().expect("config poisoned");
                 state.set_cooldown(Duration::from_secs(c.cooldown_secs));
                 enabled = c.monitoring_enabled;
+                // The watch list may have changed: show the right status now,
+                // and don't let the next USB event mistake it for a KVM switch.
+                let present = any_watched_present(&c);
+                if state.last_state() != Some(present) {
+                    let _ = tx.send(Event::PresenceChanged(present));
+                }
+                state.rebaseline(present);
             }
             Ok(Command::Poke) => poked = true,
             Err(TryRecvError::Empty) => {}
@@ -441,6 +459,23 @@ mod tests {
     fn first_evaluation_establishes_state_without_switching() {
         let (mut s, t0) = state();
         assert_eq!(s.evaluate(true, t0), None, "initial sync must not switch");
+    }
+
+    /// Ticking an already-plugged-in device changes presence false -> true
+    /// without any hardware event; that must not switch, now or later.
+    #[test]
+    fn a_rebaseline_never_switches_or_arms_a_cooldown() {
+        let (mut s, t0) = state();
+        s.evaluate(false, t0);
+
+        s.rebaseline(true);
+
+        assert_eq!(s.last_state(), Some(true));
+        assert_eq!(s.cooldown_remaining(t0), None);
+        let later = t0 + Duration::from_secs(5);
+        assert_eq!(s.evaluate(true, later), None, "no spurious Connect at the next USB event");
+        assert_eq!(s.tick(later), None, "no resync either");
+        assert_eq!(s.evaluate(false, later), Some(Action::Disconnect), "real changes still switch");
     }
 
     #[test]

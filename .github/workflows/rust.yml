@@ -33,6 +33,11 @@ jobs:
       with:
         toolchain: stable
 
+    # Caches compiled dependencies between runs; without it every run
+    # rebuilds all ~315 crates from scratch.
+    - name: Cache Rust build
+      uses: Swatinem/rust-cache@v2
+
     - name: Build
       run: cargo build --release --verbose
 
