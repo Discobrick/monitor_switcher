@@ -3,7 +3,9 @@
 Monitor Switcher is a Windows tray app that switches your monitors' inputs when a USB switch
 or KVM is toggled. It watches for the USB devices that move with your KVM (keyboard, mouse,
 webcam…) and, when they appear or disappear, tells each monitor which input to show over
-DDC/CI.
+DDC/CI. This is not an alternative for software that lets you seemlesly share a mouse and 
+keyboard between devices. This simply switches the input of the connected monitors and 
+because of that it only needs to be installed on a single computer to work.
 
 ## Setup
 
